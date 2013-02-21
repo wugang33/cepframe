@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project-private xmlns="http://www.netbeans.org/ns/project-private/1">
+    <data xmlns="http://www.netbeans.org/ns/make-project-private/1">
+        <activeConfTypeElem>1</activeConfTypeElem>
+        <activeConfIndexElem>1</activeConfIndexElem>
+    </data>
+    <editor-bookmarks xmlns="http://www.netbeans.org/ns/editor-bookmarks/2" lastBookmarkId="0"/>
+    <open-files xmlns="http://www.netbeans.org/ns/projectui-open-files/1">
+        <file>file:/E:/workspace/netbeans/cepframe/include/buffer_metadata.hpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/singleton.hpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/processing/pn.hpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/src/processing/pn.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/main.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/communication/baseutils/ZTPServer.h</file>
+        <file>file:/E:/workspace/netbeans/cepframe/src/communication/baseutils/ZTPServer.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/src/communication/baseutils/TCPServer.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/communication/baseutils/TCPServer.h</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/communication/baseutils/TCPClientNode.h</file>
+        <file>file:/E:/workspace/netbeans/cepframe/src/communication/baseutils/ZTPServerHandler.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/communication/baseutils/Encrypt.h</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/communication/baseutils/ZTPSendThread.h</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/communication/baseutils/netiobuf.h</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/communication/baseutils/FSPublic.h</file>
+        <file>file:/E:/workspace/netbeans/cepframe/src/communication/CEPConnHandler.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/src/communication/CEPDispatch.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/src/communication/baseutils/netiobuf.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/src/communication/baseutils/mmap.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/src/communication/baseutils/ZTPSendThread.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/src/communication/baseutils/TCPSocket.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/src/event2text.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/src/communication/ConnConfig.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/communication/SMatrixOL.h</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/communication/CEPDispatch.h</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/communication/baseutils/ZTPServerHandler.h</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/communication/baseutils/TCPSocket.h</file>
+        <file>file:/E:/workspace/netbeans/cepframe/src/communication/baseutils/ZTPClient.cpp</file>
+        <file>file:/E:/workspace/netbeans/cepframe/include/communication/baseutils/mmap.h</file>
+    </open-files>
+</project-private>

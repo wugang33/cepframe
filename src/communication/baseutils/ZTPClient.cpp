@@ -1,0 +1,538 @@
+#include "communication/baseutils/ZTPClient.h"
+#include "communication/baseutils/Encrypt.h"
+
+std::ostream& operator<<(std::ostream& s, const ZTPClient::Builder& r) {
+    s << &r << "::BufMode[" << (int) r.m_NetBufSetting.BufMode
+            << "] MaxMemBufSize[" << r.m_NetBufSetting.iMaxMemBufSize
+            << "] MaxFileSize[" << r.m_NetBufSetting.dwMaxFileSize
+            << "] ProperSize[" << r.m_NetBufSetting.iProperSize
+            << "] MaxBufCount[" << r.m_NetBufSetting.wMaxBufCount
+            << "] Compress[" << r.m_bCompress
+            << "] CompressLevel[" << (int) r.m_iCompressLevel
+            << "] Encrypt[" << r.m_bEncrypt
+            << "] PktSize[" << r.m_dwPktSize
+            << "] LocalPNID[" << r.m_localid
+            << "]" << endl;
+    return s;
+}
+
+ZTPClient::~ZTPClient() {
+    if (this->m_handler) {
+        delete this->m_handler;
+        this->m_handler = 0;
+    }
+}
+
+/**
+ @brief 构造函数
+ @param hndl 事件处理句柄
+ */
+ZTPClient::ZTPClient(ZTPHandler * hndl, const ZTPClient::Builder & builder) {
+    m_handler = hndl;
+    m_socket = 0;
+    m_pConnStat = 0;
+    m_sendthread = 0;
+    m_connected = false;
+
+    m_dwPktSize = builder.m_dwPktSize;
+    this->m_bEncrypt = builder.m_bEncrypt;
+    this->m_bCompress = builder.m_bCompress;
+    this->m_iCompressLevel = builder.m_iCompressLevel;
+    int ret = this->m_lzo.Init(this->m_iCompressLevel);
+    if (ret != 0) {
+        printf("ZTPClient::ZTPClient init lzo failure ret[%d]\n", ret);
+    }
+    m_lzobuflen = 0x11499;
+    m_lzobuf = new unsigned char[0x11499];
+    this->m_NetBufSetting = builder.m_NetBufSetting;
+    this->m_rcvbuf.resize(0x10400, 0);
+    memset(&m_info, 0, sizeof (ZTP_DATA_INFO));
+    m_bPostStat = true;
+    this->thread_ = 0;
+    this->isrunning = false;
+}
+
+/**
+ @brief 在 Login 和 Start 之前调用，设置所需的数据类型
+ */
+void ZTPClient::AddDataType(WORD datatype) {
+    this->m_datatypes.push_back(datatype);
+}
+
+/**
+ @brief 设置用户名和密码
+ */
+void ZTPClient::Login(const char * user, const char * passwd, unsigned int nodeid) {
+    this->m_user.assign(user, strlen(user));
+    this->m_passwd.assign(passwd, strlen(passwd));
+    this->m_localid = nodeid;
+}
+
+/**
+ @brief 启动客户端
+ */
+
+/*                               rsi        rdx               rcx                r8        r9          r10                                              */
+bool ZTPClient::Start(const char * dip, int dport, const char *oip, const int oport, int SndBuf, int RcvBuf) {
+    if (oip) {
+        if (oport) {
+            this->m_socket = new TCPSocket(oip, oport);
+        } else {
+            this->m_socket = new TCPSocket(oip);
+        }
+    } else {
+        this->m_socket = new TCPSocket();
+    }
+    this->m_socket->SetSockBufOpt(SndBuf, RcvBuf);
+    bool ret = this->m_socket->Connect(dip, dport);
+    if (ret) {
+        m_connected = true;
+    }
+    m_pConnStat = new ZTPNetStat();
+    this->m_socket->SetStat(m_pConnStat);
+    char buf[64] = {0};
+    sprintf(buf, "%d", ntohs_ex(m_socket->GetLocalAddr()->sin_port));
+    ret = m_pConnStat->Init(buf, m_bPostStat, 0);
+    if (ret) {
+        m_ip.assign(dip);
+        m_port = dport;
+        if (!this->m_sendthread) {
+            this->m_sendthread = new ZTPSendThread(m_socket, this->m_handler,\
+                true, &m_NetBufSetting, \
+                this->m_bEncrypt, this->m_bCompress, this->m_dwPktSize, \
+                this->m_iCompressLevel);
+        }
+        this->m_sendthread->start();
+        this->start();
+        if (m_connected) {
+            this->doBind();
+            m_handler->OnConnect(this->m_sendthread, dip, dport);
+            m_pConnStat->Connect(m_socket->GetRemoteAddr(), m_socket->GetLocalAddr());
+        }
+        return m_connected;
+    }
+    if (m_pConnStat) {
+        delete m_pConnStat;
+    }
+    ::fwrite("ZTPNetStat Init Error!", 1, 0x16, stderr);
+    return 0;
+}
+
+/**
+ @brief 停止客户端
+ */
+void ZTPClient::Stop() {
+    if (m_sendthread) {
+        this->m_sendthread->stop();
+    }
+    this->isrunning = false;
+    if (this->thread_) {
+        this->thread_->join();
+        delete this->thread_;
+        this->thread_ = 0;
+    }
+    if (m_handler && m_connected) {
+        m_handler->OnClose();
+    }
+    if (m_socket) {
+        m_socket->Close();
+    }
+    if (m_pConnStat) {
+        m_pConnStat->ConnClose(3);
+    }
+    if (m_sendthread) {
+        delete m_sendthread;
+        m_sendthread = 0;
+    }
+    if (this->m_socket) {
+        delete this->m_socket;
+        this->m_socket = 0;
+    }
+    if (m_pConnStat) {
+        delete m_pConnStat;
+        m_pConnStat = 0;
+    }
+
+}
+
+/**
+ @brief 向服务端发送数据
+ */
+int ZTPClient::SendData(const void * data,
+        ZTP_DATA_INFO * info,
+        int tTimeOut) {
+    if (!m_sendthread) {
+        m_pConnStat->Discard(info->data_len, 1);
+        return 2;
+    }
+    if (!m_connected) {
+        if (!this->m_sendthread->FileCacheEnable()) {
+            m_pConnStat->Discard(info->data_len, 1);
+            return 2;
+        }
+    }
+    if (this->m_NetBufSetting.iMaxMemBufSize < info->data_len) {
+        m_pConnStat->Discard(info->data_len, 1);
+        return 3;
+    }
+    while (m_sendthread) {
+        int ret = this->m_sendthread->SendData(data, info);
+        if (ret) {
+            return 0;
+        }
+        if (tTimeOut-- > 0) {
+            boost::this_thread::sleep(boost::posix_time::milliseconds(10));
+        } else {
+            m_pConnStat->Discard(info->data_len, 1);
+            this->m_pConnStat->Congestion();
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int ZTPClient::SendData(const void * buf_head,
+        UINT head_len,
+        const void * data,
+        ZTP_DATA_INFO * info,
+        int tTimeOut) {
+    if (!this->m_sendthread) {
+        return 2;
+    }
+    if (!m_connected) {
+        if (!this->m_sendthread->FileCacheEnable()) {
+            return 2;
+        } else if (!this->m_sendthread) {
+            return 0;
+        }
+    }
+    while (m_sendthread) {
+        int ret = this->m_sendthread->SendData(buf_head, head_len, data, info);
+        if (ret) {
+            return 0;
+        }
+        if (tTimeOut-- > 0) {
+            boost::this_thread::sleep(boost::posix_time::milliseconds(1));
+        } else {
+            m_pConnStat->Discard(info->data_len, 1);
+            this->m_pConnStat->Congestion();
+            return 1;
+        }
+    }
+    return 0;
+
+
+}
+
+/** 
+ @brief 直接向服务端发送数据, 不再组成大包
+ */
+int ZTPClient::SendDataDirectly(const void * buf,
+        size_t buf_len,
+        int tTimeOut) {
+    if (!this->m_sendthread) {
+        return 2;
+    }
+    if (!m_connected) {
+        if (!this->m_sendthread->FileCacheEnable()) {
+            return 2;
+        } else if (!this->m_sendthread) {
+            return 0;
+        }
+    }
+    while (m_sendthread) {
+        int ret = this->m_sendthread->SendPacket(ZTP_CMD_SEND_RECORD, ZTP_CMD_STATUS_SUCCESS, buf, buf_len);
+        if (ret) {
+            return 0;
+        }
+        if (tTimeOut-- > 0) {
+            boost::this_thread::sleep(boost::posix_time::milliseconds(1));
+        } else {
+            m_pConnStat->Discard(buf_len, 1);
+            this->m_pConnStat->Congestion();
+            return 1;
+        }
+    }
+    return 0;
+}
+
+bool ZTPClient::IsConnected() {
+    return this->m_connected;
+}
+
+/*                                      rsi          rdx            */
+int ZTPClient::SetOption(const char *optname, UINT optvalue) {
+    string s(optname);
+    if (s.compare("compress") == 0) {
+        this->m_bCompress = optvalue;
+        if (optvalue != 0) {
+            if (optvalue != 1) {
+                this->m_iCompressLevel = 9;
+            }
+        }
+        //        printf("ztpclient set compress optvalue = %d,bcompress=%d,compresslevel=%d\n", optvalue, this->m_bCompress, m_iCompressLevel);
+    }
+    if (s.compare("NetBufMode") == 0) {
+        if (optvalue > 2) {
+            this->m_NetBufSetting.BufMode = optvalue;
+        }
+    }
+    if (s.compare("NetBufCount") == 0) {
+        this->m_NetBufSetting.wMaxBufCount = optvalue;
+    }
+    if (s.compare("PostStat") == 0) {
+        this->m_bPostStat = optvalue;
+    }
+    return 0;
+}
+
+int ZTPClient::SetUsernamePassword(const char *username, const char *password) {
+    return 0;
+}
+
+void ZTPClient::run() {
+    time_t check_start;
+    time_t check_end;
+    check_start = time(0);
+    while (this->isrunning) {
+        check_end = time(0);
+        if (!m_connected) {
+            bool ret = this->m_socket->Connect(this->m_ip.c_str(), this->m_port);
+            if (ret) {
+                //               printf("reconn!\n");
+                this->doBind();
+                m_handler->OnConnect(this->m_sendthread, m_ip.c_str(), m_port);
+                if (m_connected) {
+                    this->m_pConnStat->ReConn(this->m_socket->GetRemoteAddr(), this->m_socket->GetLocalAddr());
+                } else {
+                    this->m_pConnStat->Connect(this->m_socket->GetRemoteAddr(), this->m_socket->GetLocalAddr());
+                }
+                m_connected = true;
+                m_info.flag = 0;
+                m_info.type = 0;
+                m_info.data_len = 0;
+                m_info.format = 0;
+                m_info.ver_info = 0;
+                m_info.pkg_len = 0;
+            }
+            if (!m_connected) {
+                boost::this_thread::sleep(boost::posix_time::milliseconds(100));
+                continue;
+            }
+        }
+        if ((check_end - check_start) > 0x3b) {
+            check_start = check_end;
+            //            printf("send check link\n");
+            this->SendPacket(ZTP_CMD_CHECK_LINK, 0, 0, 0);
+            this->m_pConnStat->ClearIdle();
+        }
+        int ret = this->m_socket->Select(1000, 0);
+        if (ret == 0) {//超时
+            this->OnIdle();
+            this->m_pConnStat->Idle();
+            continue;
+        } else if (ret > 0) {//成功
+            this->doRead(this->m_socket);
+            int flag = this->m_socket->GetReadFlag();
+            if (flag > 0) {
+                flag = this->m_socket->GetWriteFlag();
+                if (flag > 0) {
+                    continue;
+                }
+            }
+        }
+        m_handler->OnFail("I/O Error! Connection dropped.");
+        m_handler->OnClose();
+        m_pConnStat->ConnClose(0);
+        this->m_socket->Close();
+        this->m_connected = false;
+        m_info.flag = 0;
+        m_info.type = 0;
+        m_info.data_len = 0;
+        m_info.format = 0;
+        m_info.ver_info = 0;
+        m_info.pkg_len = 0;
+        continue;
+
+    }
+}
+
+void ZTPClient::doSendRecord(TCPSocket * conn, const BYTE * buf, int len, const WORD cmd_status) {
+    if (len <= (ZTP_HEADER_SIZE + ZTP_RECORD_HEADER_SIZE)) {
+        return;
+    }
+    ZTP_HEADER *ztp_header = (ZTP_HEADER*) buf;
+    ZTP_RECORD_HEADER*ztp_record_header = (ZTP_RECORD_HEADER*) ztp_header->ztp_data;
+    int pure_data_len = len - ZTP_HEADER_SIZE - ZTP_RECORD_HEADER_SIZE;
+    /*
+     * 如果是分组消息的非最后一包 那么放到缓冲区里面缓存起来 等待最后合并     
+     */
+    if (ZTP_CMD_STATUS_PKGSEG == cmd_status) {
+        if (this->m_rcvbuf.size()<(this->m_info.data_len + pure_data_len)) {
+            this->m_rcvbuf.resize(this->m_info.data_len + pure_data_len, 0);
+        }
+        memmove(this->m_rcvbuf.data() + this->m_info.data_len, ztp_record_header->record_data, pure_data_len);
+        this->m_info.data_len += pure_data_len;
+        m_info.flag = ztp_record_header->flag;
+        m_info.type = ntohs_ex(ztp_record_header->type);
+        m_info.format = ztp_record_header->format;
+        return;
+    }
+    int pure_data_buf_offset = 0;
+    while (pure_data_buf_offset < (pure_data_len)) {
+        ztp_record_header = (ZTP_RECORD_HEADER*) (ztp_header->ztp_data + pure_data_buf_offset);
+        m_info.flag = ztp_record_header->flag;
+        m_info.type = ntohs_ex(ztp_record_header->type);
+        m_info.ver_info = ntohs_ex(ztp_record_header->ver_info);
+        m_info.format = ztp_record_header->format;
+        int this_package_len = ntohl_ex(ztp_record_header->data_len);
+        if ((this_package_len + pure_data_buf_offset) > pure_data_len) {
+            printf("error this_package_len[%d] + pure_data_buf_offset[%d] less the pure_data_len[%d]\n", this_package_len, pure_data_buf_offset, pure_data_len);
+            return;
+        }
+        //        printf("flag[%d] type[%d] ver_info[%d] format[%d] len[%d]\n", m_info.flag, m_info.type, m_info.ver_info, m_info.format, esi);
+        if (m_info.data_len == 0) {
+            this->m_info.data_len = this_package_len;
+            this->m_info.pkg_len = this_package_len;
+        } else {
+            /*
+             * 是分组消息的最后一包
+             */
+            if (this->m_rcvbuf.size() < m_info.data_len + this_package_len) {
+                this->m_rcvbuf.resize(m_info.data_len + this_package_len, 0);
+            }
+            memmove(this->m_rcvbuf.data() + this->m_info.data_len, ztp_record_header->record_data, this_package_len);
+            m_info.data_len += this_package_len;
+            m_info.pkg_len += this_package_len;
+        }
+        pure_data_buf_offset += (ZTP_RECORD_HEADER_SIZE);
+        this->m_pConnStat->Recv(m_info.data_len, 1);
+        if (m_handler) {
+            if (m_info.data_len > this_package_len) {
+                m_handler->OnReceive(this->m_rcvbuf.data(), &m_info);
+            } else if (m_info.pkg_len == this_package_len) {
+                m_handler->OnReceive(ztp_record_header->record_data, &m_info);
+            }
+        }
+        pure_data_buf_offset += m_info.pkg_len;
+        this->m_info.data_len = 0;
+        this->m_info.pkg_len = 0;
+    }
+}
+
+void ZTPClient::doRead(TCPSocket * conn) {
+    int ret = conn->ReadAll(m_buf, ZTP_BCM_HEADER_SIZE);
+    if (ret <= 0) {
+        return;
+    }
+    int encrypted = 0;
+    ZTP_HEADER*ztp_header = (ZTP_HEADER*) m_buf;
+    if (ntohs_ex(*(unsigned short *) ztp_header->bcm_head.magic) != ZTP_MAGIC_NUM) {
+        Encrypt::Decode((BYTE*) ztp_header, ZTP_BCM_HEADER_SIZE);
+        encrypted = true;
+        if (ntohs_ex(*(unsigned short *) ztp_header->bcm_head.magic) != ZTP_MAGIC_NUM) {
+            conn->Close();
+            m_handler->OnFail("Invalid packet.Close connection.");
+            m_handler->OnClose();
+            m_pConnStat->ConnClose(2);
+            return;
+        }
+    }
+    int package_len = ntohs_ex(ztp_header->bcm_head.package_len);
+    ret = conn->ReadAll((char*) &ztp_header->cmd, package_len);
+    if (ret <= 0) {
+        return;
+    }
+    //    this->m_pConnStat->Recv(package_len + ZTP_BCM_HEADER_SIZE, 1);
+    if (encrypted) {
+        Encrypt::Decode((BYTE*) & ztp_header->cmd, package_len);
+    }
+    if ((package_len - ZTP_CMD_SIZE) > 0) {
+        if (ztp_header->bcm_head.isCompress) {
+            //            cout << "before decompress" << data_len + 0x06 + 0x05 << endl;
+            int DeCompressedlen = this->m_lzobuflen;
+            int ret = this->m_lzo.DeCompress((unsigned char *) ztp_header->ztp_data, package_len - ZTP_CMD_SIZE, m_lzobuf, DeCompressedlen);
+            if (ret != 0) {
+                printf("error ZTPClient::doRead decompress error ret[%d]\n", ret);
+                conn->Close();
+                m_pConnStat->ConnClose(EN_INVALIDPROTO);
+                return;
+            }
+            package_len = DeCompressedlen;
+            package_len += ZTP_CMD_SIZE;
+            memcpy(ztp_header->ztp_data, m_lzobuf, DeCompressedlen);
+            ztp_header->bcm_head.package_len = htons_ex((unsigned short) package_len);
+            //            cout << "after decompress" << data_len + 0x0b << endl;
+        }
+    }
+    unsigned short cmd = ntohs_ex(ztp_header->cmd.cmd);
+    unsigned short cmd_status = ntohs_ex(ztp_header->cmd.cmd_status);
+    if (ZTP_CMD_BIND == cmd) {//server  bind
+        this->forBind(this->m_socket, (BYTE*) ztp_header, package_len + ZTP_BCM_HEADER_SIZE, cmd_status);
+    } else if (ZTP_CMD_SEND_RECORD == cmd) {
+        this->doSendRecord(this->m_socket, (BYTE*) ztp_header, package_len + ZTP_BCM_HEADER_SIZE, cmd_status);
+    } else if (ZTP_CMD_CHECK_LINK == cmd) {
+        //        printf("ZTP_CMD_CHECK_LINK_RESP\n");
+        this->SendPacket(ZTP_CMD_CHECK_LINK_RESP, 0, 0, 0);
+    } else if (cmd < ZTP_CMD_BIND_RESP && cmd > ZTP_CMD_UNBIND) {
+        this->m_handler->OnFail("Unknow command id,Close connection.");
+        m_handler->OnClose();
+        m_pConnStat->ConnClose(2);
+        conn->Close();
+        this->m_connected = false;
+    } else {
+    }
+}
+
+void ZTPClient::doBind() {
+    vector<char> vec;
+    vec.resize(2 * this->m_datatypes.size() + 0x22, 0);
+    char * buf = (char*) vec.data();
+    strncpy(buf, m_user.c_str(), 0x0e);
+    strncpy(buf + 0x10, m_passwd.c_str(), 0x0e);
+    //stolen 4byte from username and password 's end and give it to m_nodeid
+    unsigned short m_nodeid_high = this->m_localid >> 16;
+    *(unsigned short*) (buf + 0x0e) = htons_ex(m_nodeid_high);
+    unsigned short m_nodeid_low = m_localid & 0xffff;
+    *(unsigned short*) (buf + 0x1e) = htons_ex(m_nodeid_low);
+    *(unsigned short*) (buf + 0x20) = htons_ex(this->m_datatypes.size());
+    for (int i = 0; i<this->m_datatypes.size(); i++) {
+        *(unsigned short*) (buf + 0x22 + i * 2) = htons_ex(this->m_datatypes[i]);
+    }
+    this->SendPacket(1, 0, buf, vec.size());
+}
+
+void ZTPClient::doCheckLink() {
+    this->SendPacket(ZTP_CMD_CHECK_LINK, 0, 0, 0);
+}
+
+void ZTPClient::SendPacket(WORD cmd, WORD cmd_status, const void * buf, size_t len) {
+    while (m_sendthread) {
+        int ret = m_sendthread->SendPacket(cmd, cmd_status, buf, len);
+        if (ret) {
+            return;
+        }
+        boost::this_thread::sleep(boost::posix_time::milliseconds(10));
+    }
+}
+
+void ZTPClient::OnIdle() {
+    if (this->m_info.data_len) {
+        this->m_info.pkg_len = m_info.data_len;
+        m_info.ver_info = 0;
+        m_handler->OnReceive(m_rcvbuf.data(), &m_info);
+    }
+    m_handler->OnIdle();
+}
+
+void ZTPClient::forBind(TCPSocket * conn, const BYTE * buf, int len, const WORD cmd_status) {
+    ZTP_HEADER*ztp_header = (ZTP_HEADER*) buf;
+    BIND_COMMAND_NEW*bind_new = (BIND_COMMAND_NEW*) (ztp_header->ztp_data);
+    unsigned short m_nodeid_high = bind_new->m_nodeid_high;
+    unsigned short m_nodeid_low = bind_new->m_nodeid_low;
+    this->m_remoteid = ntohs_ex(m_nodeid_high);
+    m_remoteid <<= 16;
+    m_remoteid |= ntohs_ex(m_nodeid_low);
+    char buffer[8] = {0};
+    this->m_handler->OnAuth(buffer, buffer, (WORD*) & m_remoteid, 0, (ZTPServerHandler*) 0);
+}

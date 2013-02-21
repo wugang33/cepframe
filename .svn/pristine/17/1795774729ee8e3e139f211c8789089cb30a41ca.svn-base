@@ -1,0 +1,711 @@
+/* 
+ * File:   DispatchInterceptor.cpp
+ * Author: Administrator
+ * 
+ * Created on 2012年3月20日, 下午9:06
+ */
+
+#include "communication/CEPDispatch.h"
+#include "communication/CEPConnHandler.h"
+#include "communication/baseutils/ZTPClient.h"
+#include "communication/ConnConfig.h"
+#include "macro_log.hpp"
+#include "utils_xml.hpp"
+#include "utils_cstr2nbr.hpp"
+#include "event.hpp"
+#include "utils_nbr2str.hpp"
+#include "processing/pn.hpp"
+#include "config_metadata.hpp"
+#define NODEID 0
+CEPDispatch * CEPDispatch::m_dispatch = new CEPDispatch(NODEID);
+
+bool CEPDispatch::Start() {
+    if (m_cephandler) {
+        delete m_cephandler;
+        m_cephandler = 0;
+    }
+    if (!m_cephandler) {
+        m_cephandler = new CEPConnHandler(m_localid);
+        m_cephandler->setCEPDispatch(this);
+    }
+    if (CEP_MASTER_NODEID == m_localid) {/*is master*/
+        MLOG_INFO << "ZTPServer Configuration INFO " << endl << m_srvbuilder << endl;
+        ZTPServer* master = new ZTPServer(m_cephandler->Clone(), m_srvbuilder);
+        if (!master->Start()) {
+            MLOG_ERROR << " Can't Start Master ZTP Service on port[" << m_srvbuilder.m_port << "]  start dispatch failer!!!" << endl;
+            delete master;
+            return false;
+        }
+        this->addServer(master);
+        MLOG_INFO << "CEPDispatch Master(pnid=0) Start  on port[" << m_srvbuilder.m_port << "] successful." << endl;
+    } else {
+        /*
+         * 如果是client  那么需要得到Master的IP 和 PORT
+         */
+        MLOG_INFO << "ZTPClient Configuration INFO " << endl << m_clibuilder << endl;
+        string ip = m_config->get_value("MASTERIP", "127.0.0.1");
+        string name = m_config->get_value("ZTPNAME", "");
+        string paswd = m_config->get_value("ZTPPASSWORD", "");
+        unsigned short port = m_config->get_value("MASTERPORT", (unsigned short) DEFAULT_MASTERPORT);
+        MLOG_INFO << "ZTPClient Connecting to PN[0](master) IP[" << ip << "]  PORT[" << port << "]..." << endl;
+        ZTPClient *zc = new ZTPClient(m_cephandler->Clone(), m_clibuilder);
+        zc->Login(name.c_str(), paswd.c_str(), m_localid);
+        if (!zc->Start(ip.c_str(), port)) {
+            MLOG_INFO << "Can't connecting to  PN(0)(master) start dispatch failer!!!" << endl;
+        } else {
+            MLOG_INFO << "Connecting to  PN(0)(master) start dispatch successful." << endl;
+        }
+        this->setMasterZTPClient(zc);
+    }
+    this->start();
+    MLOG_INFO << "Start CEPDispatch successful." << endl;
+    return true;
+}
+
+CEPDispatch::CEPDispatch(unsigned int localid) : m_smatrix(0), m_masterclient(0), m_localid(localid), m_config(0), m_cephandler(0) {
+    this->thread_ = 0;
+}
+
+CEPDispatch::CEPDispatch(const CEPDispatch& orig) {
+}
+
+CEPDispatch::~CEPDispatch() {
+}
+
+void CEPDispatch::doInterceptor(const void*data, ZTP_DATA_INFO*info, ZTPHandler*ztphandler) {
+    CEPConnHandler *connhandl = (CEPConnHandler*) ztphandler;
+    unsigned char flag = info->flag;
+    switch (flag) {
+        case CEP_DATA_FLAG:
+        {
+            char* body = new char[info->data_len];
+            memcpy(body, data, info->data_len);
+            cep::event * e = new cep::event(body, info->data_len, info->type);
+            e->set_metadata(cep::config_metadata::instance().metadata(info->type));
+            e->set_pe_id(info->ver_info);
+            this->dispatchstat_.RecvDataCount++;
+            this->dispatchstat_.RecvDataLen += info->data_len;
+            cep::pn::instance().push(*e);
+        }
+            break;
+        case CEP_SLAVE_REQUEST:
+            doSlaveRequest(data, info, connhandl);
+            break;
+        case CEP_MASTER_COMMAND:
+            doMasterCommand(data, info, connhandl);
+            break;
+        case CEP_CONNECTED:
+            doConnect(data, info, connhandl);
+            break;
+        case CEP_CONN_CLOSE:
+            doClose(data, info, connhandl);
+            break;
+        default:
+            return;
+    }
+}
+
+void CEPDispatch::run() {
+    DispatchStat dispatchstat;
+    while (this->isrunning) {
+        if (m_masterclient && m_masterclient->IsConnected()) {
+            //            MLOG_INFO << "CEPDispatch::main():Can't connect to PN[0](master)!!!" << endl;
+
+            cout << "info CEPDispatch\tdiscard[" << dispatchstat_.DiscardCount << "]\t\tlast discard pn[" << dispatchstat_.LastDiscardPN << "]" << endl;
+            //            cout << "info CEPDispatch\tsend failure[" << dispatchstat_.SendCountFail << "]" << endl;
+            cout << "info CEPDispatch\tsend success[" << dispatchstat_.SendCountSucc << "]\t\tspeed[" << (this->dispatchstat_.SendCountSucc - dispatchstat.SendCountSucc) / 6 << "]" << endl;
+            cout << "info CEPDispatch\trecv success[" << dispatchstat_.RecvDataCount << "]\t\tspeed[" << (this->dispatchstat_.RecvDataCount - dispatchstat.RecvDataCount) / 6 << "]" << endl;
+            dispatchstat = this->dispatchstat_;
+        }
+        this->m_clientlock.lock();
+        vector<ZTPClient*>::iterator iter = this->m_client.begin();
+        for (; iter != this->m_client.end();) {
+            ZTPClient * zxt = *iter;
+            if (!zxt->IsConnected()) {
+                iter = m_client.erase(iter++);
+                MLOG_INFO << "CEPDispatch::main():clear a unconnected ztp client from LocalPN[" << zxt->GetLocalID() << "] to RemotePN[" << zxt->GetRemoteID() << "]" << endl;
+                zxt->Stop();
+                delete zxt;
+            } else {
+                iter++;
+            }
+        }
+        this->m_clientlock.unlock();
+        boost::this_thread::sleep(boost::posix_time::seconds(6));
+    }
+}
+
+void CEPDispatch::addServer(ZTPServer*server) {
+
+    this->m_serverlock.lock();
+    this->m_server.push_back(server);
+    this->m_serverlock.unlock();
+}
+
+void CEPDispatch::addClient(ZTPClient*client) {
+    this->m_clientlock.lock();
+    this->m_client.push_back(client);
+    this->m_clientlock.unlock();
+}
+
+/*
+ * 处理master发送过来的命令 命令字 201
+ */
+void CEPDispatch::doMasterCommand(const void*data, ZTP_DATA_INFO*info, CEPConnHandler *cephandler) {
+    if (CEP_MASTER_NODEID == cephandler->getLocalId()) {
+        MLOG_ERROR << "[CEPDispatch::doMasterCommand:] Master get a salver command.the pnid configuration error!!!" << endl;
+        return;
+    }
+    int type = info->type;
+    switch (info->type) {
+            /*
+             * 0x1001收到了开启一个服务端的指令 指令没有内容
+             * 0x0001报告服务开启  port
+             * 0xFFFF  错误  错误编码0x01
+             */
+        case 0x1001:
+        {
+            CEPConnHandler *cch = (CEPConnHandler*) cephandler->Clone();
+            ZTPServer::Builder builder = this->m_srvbuilder;
+            builder.m_localid = cephandler->getLocalId();
+            builder.m_port = 0;
+            ZTPServer *ztpserver = new ZTPServer(cch, builder);
+            MLOG_INFO << "[CEPDispatch::doMasterCommand:] Master order LocalPN[" << cephandler->getLocalId() << "] Start a ZTPServer." << endl;
+            if (ztpserver->Start()) {
+                this->addServer(ztpserver);
+                unsigned short port = ztpserver->GetPort();
+                char buf[2] = {0};
+                *(unsigned short *) buf = convert_16_ex(port);
+                this->sendCommand(cephandler, CEP_SLAVE_REQUEST, 0x0001, buf, sizeof (buf));
+            } else {
+                MLOG_ERROR << "[CEPDispatch::doMasterCommand:]LocalPN[" << cephandler->getLocalId() << "] Start a ZTPServer failure!!!" << endl;
+                char buf[2] = {0};
+                *(unsigned short *) buf = convert_16_ex(01);
+                this->sendCommand(cephandler, CEP_SLAVE_REQUEST, 0xFFFF, buf, sizeof (buf));
+                delete ztpserver;
+            }
+        }
+            break;
+        case 0x1002:
+        {
+            /*
+             * 0x1002 收到master的命令 需要与这个连接的这个端口建立连接
+             */
+            int server_nr = convert_16_ex(*(unsigned short *) data);
+            for (int i = 0; i < server_nr; i++) {
+                unsigned int node_id = convert_32_ex(*(unsigned int *) ((char*) data + i * 10 + 2));
+                unsigned int ip = convert_32_ex(*(unsigned int *) ((char*) data + i * 10 + 2 + 4));
+                string ipstr = cep::ip2str(ip);
+                unsigned short port = convert_16_ex(*(unsigned short *) ((char*) data + i * 10 + 2 + 8));
+                MLOG_INFO << "[CEPDispatch::doMasterCommand:] Master order LocalPN[" << cephandler->getLocalId() << "] connect to RemotePN[" << node_id << "] ZTPServer IP[" << ipstr << "] PORT[" << port << "]." << endl;
+                bool is_exist_conn = false;
+                this->m_connmaplock.lock();
+                ConnMap::iterator is_exist_iter = this->m_connmap.find(node_id);
+                if (is_exist_iter != this->m_connmap.end()) {
+                    is_exist_conn = true;
+                }
+                this->m_connmaplock.unlock();
+                if (!is_exist_conn) {
+                    CEPConnHandler *cch = (CEPConnHandler*) cephandler->Clone();
+                    ZTPClient *ztpclient = new ZTPClient(cch, m_clibuilder);
+                    ztpclient->Login("", "", cephandler->getLocalId());
+                    ztpclient->Start(ipstr.c_str(), port);
+                    this->addClient(ztpclient);
+                    MLOG_INFO << "[CEPDispatch::doMasterCommand:] LocalPN[" << cephandler->getLocalId() << "] connect to RemotePN[" << node_id << "] ZTPServer IP[" << ipstr << "] PORT[" << port << "]." << endl;
+                } else {
+                    MLOG_INFO << "[CEPDispatch::doMasterCommand:] LocalPN[" << cephandler->getLocalId() << "]  already connect to RemotePN[" << node_id << "]." << endl;
+                }
+            }
+        }
+            break;
+        default:
+            break;
+    }
+    return;
+}
+
+/*
+ * 处理slave发送过来的请求   命令字 200
+ */
+void CEPDispatch::doSlaveRequest(const void*data, ZTP_DATA_INFO*info, CEPConnHandler *cephandler) //处理slave发送过来的请求   命令字 200
+{
+    if (CEP_MASTER_NODEID != cephandler->getLocalId()) {
+        MLOG_ERROR << "[CEPDispatch::doSlaveRequest:] Slave get a master command.the pnid configuration error!!!" << endl;
+        return;
+    }
+    switch (info->type) {
+        case 0x0001:
+        {
+            /*
+             * 0x0001 master收到了client建立服务端的信息 port
+             * 0x1002 master 通知client去连接 这个ip和这个端口
+             */
+            unsigned short port = convert_16_ex(*(unsigned short*) data);
+            CEPServerNode * csn = new CEPServerNode();
+            csn->m_ip = cephandler->getRemoteIP();
+            csn->m_port = port;
+            csn->m_nodeid = cephandler->getRemoteId();
+            MLOG_INFO << "[CEPDispatch::doSlaveRequest:]Slave  RemotePN[" << cephandler - csn->m_nodeid << "] create ZTP Service on IP[" << cep::ip2str(csn->m_ip) << "] PORT[" << csn->m_port << "] successful." << endl;
+            //            printf("slave[%u] create a server ip[%x] port[%u]\n", csn->m_nodeid, csn->m_ip, csn->m_port);
+            this->m_nodemaplock.lock();
+            this->m_nodemap.insert(make_pair<unsigned int, CEPServerNode*>(csn->m_nodeid, csn));
+            this->m_nodemaplock.unlock();
+            /*
+             * 遍历配置的一行 用来通知客户端连接这个服务
+             */
+            assert(csn->m_nodeid < m_smatrix->m_rownr);
+            if (m_smatrix->m_rowhead[csn->m_nodeid]) {
+                SMatrix::OLNode* nodeptr = m_smatrix->m_rowhead[csn->m_nodeid];
+                while (nodeptr) {
+                    unsigned int client_nodeid = nodeptr->m_col;
+                    this->m_connmaplock.lock();
+                    ConnMap::iterator conn_iter = this->m_connmap.find(client_nodeid);
+                    if (conn_iter != this->m_connmap.end()) {
+                        MLOG_INFO << "[CEPDispatch::doSlaveRequest:]Master send command to order PN[" << client_nodeid << "] connect to RemotePN[" << csn->m_nodeid << "] IP[" << cep::ip2str(csn->m_ip) << "] PORT[" << csn->m_port << "]." << endl;
+                        char buffer[12] = {0};
+                        *(unsigned short*) (buffer) = convert_16_ex(1);
+                        *(unsigned int*) (buffer + 2) = convert_32_ex(cephandler->getRemoteId());
+                        *(unsigned int *) (buffer + 6) = convert_32_ex(csn->m_ip);
+                        *(unsigned short*) (buffer + 10) = convert_16_ex(port);
+                        this->sendCommand(conn_iter->second, CEP_MASTER_COMMAND, 0x1002, buffer, sizeof (buffer));
+                    }
+                    this->m_connmaplock.unlock();
+                    nodeptr = nodeptr->m_right;
+                }
+            }
+        }
+            break;
+        case 0x0002:
+        {
+            /*
+             * 客户端报告不能找到一个节点的连接 有两种情况 有可能是服务器找不到客户端 
+             * 也有可能是客户端找不到服务器 这样的情况 我先默认请求连接的是客户端 而被请求的
+             * 节点是服务器 
+             */
+            unsigned int node_id = convert_32_ex(*(unsigned int *) data);
+            MLOG_INFO << "[CEPDispatch::doSlaveRequest:]Slave RemotePN[" << cephandler->getRemoteId() << "] request a connect info to PN[" << node_id << "]." << endl;
+            if (CEP_MASTER_NODEID == node_id) {
+                MLOG_ERROR << "[CEPDispatch::doSlaveRequest:]Slave RemotePN[" << cephandler->getRemoteId() << "] request a connect info to PN[" << node_id << "]!!!" << endl;
+                break;
+            }
+            this->m_nodemaplock.lock();
+            ServerMap::iterator node_iter = this->m_nodemap.find(node_id);
+            bool findserv = false;
+            if (node_iter != m_nodemap.end()) {
+                findserv = true;
+                char buffer[12] = {0};
+                *(unsigned short*) (buffer) = convert_16_ex(1);
+                *(unsigned int*) (buffer + 2) = convert_32_ex(node_iter->second->m_nodeid);
+                *(unsigned int *) (buffer + 6) = convert_32_ex(node_iter->second->m_ip);
+                *(unsigned short*) (buffer + 10) = convert_16_ex(node_iter->second->m_port);
+                this->sendCommand(cephandler, CEP_MASTER_COMMAND, 0x1002, buffer, sizeof (buffer));
+                MLOG_INFO << "[CEPDispatch::doSlaveRequest:]Mater answer RemotePN[" << cephandler->getRemoteId() << "] connect to PN[" << node_id << "] IP[" << cep::ip2str(node_iter->second->m_ip) << "] PORT[" << node_iter->second->m_port << "]" << endl;
+            }
+            this->m_nodemaplock.unlock();
+            if (!findserv) {
+                this->m_nodemaplock.lock();
+                node_iter = this->m_nodemap.find(cephandler->getRemoteId());
+                char buf[12] = {0};
+                if (node_iter != m_nodemap.end()) {
+                    findserv = true;
+                    *(unsigned short*) (buf) = convert_16_ex(1);
+                    *(unsigned int*) (buf + 2) = convert_32_ex(node_iter->second->m_nodeid);
+                    *(unsigned int *) (buf + 6) = convert_32_ex(node_iter->second->m_ip);
+                    *(unsigned short*) (buf + 10) = convert_16_ex(node_iter->second->m_port);
+                }
+                this->m_nodemaplock.unlock();
+                if (findserv) {//发现请求的客户端开启了服务 那么告诉对方来连接你
+                    this->m_connmaplock.lock();
+                    ConnMap::iterator conn_iter = this->m_connmap.find(node_id);
+                    if (conn_iter != this->m_connmap.end()) {
+                        this->sendCommand(conn_iter->second, CEP_MASTER_COMMAND, 0x1002, buf, sizeof (buf));
+                        MLOG_INFO << "[CEPDispatch::doSlaveRequest:]Master info PN[" << node_id << "]  connect to RemotePN[" << node_iter->second->m_nodeid << "] IP[" << cep::ip2str(node_iter->second->m_ip) << "] PORT[" << node_iter->second->m_port << "]" << endl;
+                    } else {
+                        MLOG_ERROR << "[CEPDispatch::doSlaveRequest:]Master info PN[" << node_id << "]  connect to RemotePN[" << node_iter->second->m_nodeid << "] IP[" << cep::ip2str(node_iter->second->m_ip) << "] PORT[" << node_iter->second->m_port << "] but PN[" << node_id << "] is not online!!!" << endl;
+                        //                        printf("CEPDispatch::doSlaveRequest nodeid[%u]have a server port and asker connect to nodeid[%u] but [%u] is not online\n ", cephandler->getRemoteId(), node_id, node_id);
+                        this->m_connmaplock.unlock();
+                        break;
+                    }
+                    this->m_connmaplock.unlock();
+                } else {
+                    /*
+                     *如果两端都是online
+                     * 两端都是没有开启服务
+                     * 那么告诉请求的一方开启一个连接服务
+                     * 然后更新servclient config表
+                     * config应该是需要加锁的暂时不加了
+                     */
+                    unsigned int remoteid = cephandler->getRemoteId();
+                    this->m_smatrix->insert(remoteid, node_id, 1);
+                    char buffer[2] = {0};
+                    *(unsigned short*) buffer = convert_16_ex(0x3389);
+                    this->sendCommand(cephandler, CEP_MASTER_COMMAND, 0x1001, buffer, sizeof (buffer));
+                    MLOG_INFO << "[CEPDispatch::doSlaveRequest:]Master info RemotePN[" << remoteid << "] start a ZTP Service." << endl;
+                }
+            }
+
+        }
+
+            break;
+        case 0xFFFF://接收到一个失败的信息
+        {
+            MLOG_ERROR << "[CEPDispatch::doSlaveRequest:]report a failure event from RemotePN[" << cephandler->getRemoteId() << "]" << endl;
+            //            printf("remote pn[%u] start ztpserver failer\n", cephandler->getRemoteId());
+        }
+            break;
+        default:
+            break;
+    }
+
+    return; //200是master向客户端发送的命令 201是客户端向master发送的命令
+}
+
+bool CEPDispatch::requestConnection(unsigned int nodeid) {
+    if (this->m_masterclient->IsConnected()) {
+        char buffer[ZTP_RECORD_HEADER_SIZE + sizeof (INT)] = {0};
+        ZTP_RECORD_HEADER *record_header = (ZTP_RECORD_HEADER*) buffer;
+        record_header->flag = CEP_SLAVE_REQUEST;
+        record_header->type = convert_16_ex(0x0002);
+        record_header->ver_info = 0;
+        record_header->format = 0;
+        record_header->data_len = convert_32_ex(sizeof (INT));
+        *(unsigned int *) (record_header->record_data) = convert_32_ex(nodeid);
+        int ret = this->m_masterclient->SendDataDirectly(buffer, sizeof (buffer));
+        return ret;
+    }
+    return false;
+}
+
+void CEPDispatch::dispatch(const cep::event&e, unsigned int nodeid) {
+    ZTP_DATA_INFO info;
+    info.flag = CEP_DATA_FLAG;
+    info.format = 1;
+    info.data_len = info.pkg_len = e.len();
+    info.ver_info = e.pe_id();
+    info.type = e.type();
+    if (nodeid == m_localid) {
+        this->m_cephandler->OnReceive(e.data(), &info);
+        return;
+    }
+    bool alreadyconnect = false;
+    bool alreadyrequestconnec = false;
+    int timeout = 100 * 10; /*超时1000毫秒  1S钟*/
+    do {
+        m_connmaplock.lock();
+        ConnMap::iterator iter = m_connmap.find(nodeid);
+        if (iter != m_connmap.end()) {
+            alreadyconnect = true;
+            if (iter->second->getZTPService()->SendData(e.data(), &info)) {//应该是这里有问题  目测
+                this->dispatchstat_.SendCountSucc++;
+                this->dispatchstat_.SendDatalenSucc += info.data_len;
+                m_connmaplock.unlock();
+                return;
+            }
+            timeout += 5;
+        } else {
+            alreadyconnect = false;
+        }
+        m_connmaplock.unlock();
+        if (!alreadyconnect && !alreadyrequestconnec) {
+            if (this->requestConnection(nodeid)) {
+                this->dispatchstat_.SendCommand2MasterSucc++;
+                alreadyrequestconnec = true;
+            } else {
+                this->dispatchstat_.SendCommand2MasterFail++;
+            }
+        }
+        timeout -= 10;
+        boost::this_thread::sleep(boost::posix_time::milliseconds(10));
+    } while (timeout > 0);
+    this->dispatchstat_.LastDiscardPN = nodeid;
+    this->dispatchstat_.DiscardCount++;
+    return;
+}
+
+bool CEPDispatch::sendCommand(CEPConnHandler*handler, unsigned char flag, unsigned int type, const char *buf, unsigned int buflen) {
+    char buffer[buflen + ZTP_RECORD_HEADER_SIZE];
+    memset(buffer, 0, buflen + ZTP_RECORD_HEADER_SIZE);
+    ZTP_RECORD_HEADER *record_header = (ZTP_RECORD_HEADER*) (buffer);
+    record_header->flag = flag;
+    record_header->type = convert_16_ex(type);
+    record_header->format = 0;
+    record_header->ver_info = 0;
+    record_header->data_len = convert_32_ex(buflen);
+    memcpy(record_header->record_data, buf, buflen);
+    bool ret = handler->getZTPService()->SendPacket(ZTP_CMD_SEND_RECORD, ZTP_CMD_STATUS_SUCCESS, (BYTE*) record_header, buflen + ZTP_RECORD_HEADER_SIZE);
+    if (!ret) {
+        MLOG_ERROR << "[CEPDispatch::sendCommand:] failure flag[" << flag << "]\ttype[" << type << "]/t buf[" << buf << "]!!!";
+        //        printf("cepdispatch sendCommand fail flag[%d] type[0x%x] buf[%s]\n", flag, type, buf);
+    }
+    return ret;
+}
+
+void CEPDispatch::doConnect(const void*data, ZTP_DATA_INFO*info, CEPConnHandler * cephandler) {
+    /*报告一个远端连接到了本地 或者是一个本地连接到了远端 需要发送给远端
+     * 的指令 比如通知远端是否是需要开启服务 或者是需要连接那个服务的那个端口
+     * 首先把连接放到conn里面 如果是master节点 那么还需要通知连上来的client去连接这个节点
+     * 202 告诉子节点需要开启这个端口 开启成功后需要报告给master
+     */
+    unsigned int node_id = *(unsigned int *) data;
+    MLOG_INFO << "[CEPDispatch::doConnect:]connected with PN[" << node_id << "] IP[" << cep::ip2str(cephandler->getRemoteIP()) << "] PORT[" << cephandler->getRemotePort() << "] successful..." << endl;
+    //    printf("doConnect node_id[%u]\n", node_id);
+    this->m_connmaplock.lock();
+    this->m_connmap.insert(make_pair<unsigned int, CEPConnHandler *> (node_id, cephandler));
+    this->m_connmaplock.unlock();
+    //    if (CEP_MASTER_NODEID == cephandler->getRemoteId()) {//如果远端是master 那么把这条连接放到自己的那里面
+    //        m_materhandlerlock.lock();
+    //        if (this->masterhandler) {
+    //            printf("CEPDispatch::doConnect error get two connect to the master\n");
+    //        }
+    //        this->masterhandler = cephandler;
+    //        m_materhandlerlock.unlock();
+    //    }
+    if (CEP_MASTER_NODEID == cephandler->getLocalId()) {//是master 如果这个节点是服务节点 那么通知开启服务 如果是客户端节点 那么连接到注册了的客户端
+        //        printf("m_smatrix[%p]\n", m_smatrix->m_rowhead[1]);
+        if (m_smatrix->m_rowhead[node_id]) {//如果这个节点必须要开启服务
+            char buffer[2] = {0};
+            *(unsigned short*) buffer = convert_16_ex(0x3389);
+            MLOG_INFO << "[CEPDispatch::doConnect:]master send command order PN[" << node_id << "]start ZTP Service." << endl;
+            this->sendCommand(cephandler, CEP_MASTER_COMMAND, 0x1001, buffer, sizeof (buffer));
+        }
+        /*
+         *这个节点需要连接到其他的服务器
+         */
+        assert(node_id < m_smatrix->m_colnr);
+        if (m_smatrix->m_colhead[node_id]) {
+            vector<char> commandvec;
+            commandvec.reserve(32);
+            commandvec.resize(2, 0);
+            SMatrix::OLNode * nodeptr = m_smatrix->m_colhead[node_id];
+            while (nodeptr) {
+                unsigned int serv_nodeid = nodeptr->m_row;
+                this->m_nodemaplock.lock();
+                ServerMap::iterator node_iter = this->m_nodemap.find(serv_nodeid);
+                for (; node_iter != this->m_nodemap.end(); node_iter++) {
+                    *((unsigned short*) commandvec.data()) = *((unsigned short*) commandvec.data()) + 1;
+                    int oldsize = commandvec.size();
+                    int newsize = oldsize + 10; //id ip  port
+                    commandvec.resize(newsize, 0);
+                    *((unsigned int*) (commandvec.data() + oldsize)) = convert_32_ex(node_iter->second->m_nodeid);
+                    *((unsigned int*) (commandvec.data() + oldsize + 4)) = convert_32_ex(node_iter->second->m_ip);
+                    *((unsigned short*) (commandvec.data() + oldsize + 8)) = convert_16_ex(node_iter->second->m_port);
+                    MLOG_INFO << "[CEPDispatch::doConnect:]master send command order PN[" << cephandler->getRemoteId() << "]connect to PN[" << serv_nodeid << "] IP[" << cep::ip2str(node_iter->second->m_ip) << "] PORT[" << node_iter->second->m_port << "]." << endl;
+                    //                    printf("master let the client[%u] to connect node[%u] ip[%x] port[%u]\n", cephandler->getRemoteId(), node_iter->second->m_nodeid, node_iter->second->m_ip, node_iter->second->m_port);
+                }
+                this->m_nodemaplock.unlock();
+                nodeptr = nodeptr->m_down;
+            }
+
+            *((unsigned short*) commandvec.data()) = convert_16_ex(*((unsigned short*) commandvec.data()));
+            this->sendCommand(cephandler, CEP_MASTER_COMMAND, 0x1002, commandvec.data(), commandvec.size());
+        }
+    }
+    return;
+}
+
+void CEPDispatch::doClose(const void*data, ZTP_DATA_INFO*info, CEPConnHandler * cephandler) {
+    /*
+     * 默认这样一种情况 如果client断开了连接 那么该节点提供的服务也没有了
+     */
+    unsigned int node_id = *(unsigned int *) data;
+    //    printf("0x0003 node_id[%u]\n", node_id);
+    unsigned int remotenodeid = cephandler->getRemoteId();
+    this->m_connmaplock.lock();
+    ConnMap::iterator iter = this->m_connmap.find(remotenodeid);
+    bool findConn = false;
+    for (; iter != this->m_connmap.end(); iter++) {
+        if (iter->second == cephandler) {
+            findConn = true;
+            this->m_connmap.erase(iter);
+            break;
+        }
+    }
+    this->m_connmaplock.unlock();
+    if (!findConn) {
+        printf("ERROR CEPDispatch::doClose but not find a conn remoteid[%d] remoteip[%s] remoteport[%d]\n", cephandler->getRemoteId(), cep::ip2str(cephandler->getRemoteIP()).c_str(), cephandler->getRemotePort());
+    } else {
+        printf("INFO conn remoteid[%d] remoteip[%s] remoteport[%d] droped\n", cephandler->getRemoteId(), cep::ip2str(cephandler->getRemoteIP()).c_str(), cephandler->getRemotePort());
+    }
+    this->m_nodemaplock.lock();
+    ServerMap::iterator node_iter = this->m_nodemap.find(remotenodeid);
+    for (; node_iter != this->m_nodemap.end();) {
+        this->m_nodemap.erase(node_iter++);
+    }
+    this->m_nodemaplock.unlock();
+    return;
+}
+
+void CEPDispatch::resetConfig() {
+    if (this->m_config) {
+        this->m_config->reset();
+    }
+    this->m_srvbuilder.reset();
+    this->m_clibuilder.reset();
+    if (this->m_smatrix) {
+        this->m_smatrix->clear();
+    }
+}
+
+void CEPDispatch::reload_metadata(const cep::xml_element& xml) {
+    resetConfig();
+    if (!this->m_smatrix) {
+        this->m_smatrix = new SMatrix(65535, 65535);
+    }
+    if (!this->m_config) {
+        this->m_config = new ConnConfig();
+    }
+    const cep::xml_element *ele = cep::find_element(xml, "localpn");
+    cep::slice svar1, svar2, default_value("");
+    if (NULL != ele) {
+        svar1 = cep::name(*ele);
+        if (strcmp("localpn", svar1.data()) == 0) {
+            svar2 = cep::attribute(*ele, "id", default_value);
+            if (svar2.compare(default_value) != 0) {
+                this->m_config->set_value("localpnid", svar2.to_string());
+            }
+        }
+    }
+    ele = cep::find_element(xml, "master");
+    if (NULL != ele) {
+        svar1 = cep::name(*ele);
+        if (strcmp("master", svar1.data()) == 0) {
+            svar2 = cep::attribute(*ele, "ip", default_value);
+            if (svar2.compare(default_value) != 0) {
+                this->m_config->set_value("MASTERIP", svar2.to_string());
+            }
+            svar2 = cep::attribute(*ele, "port", default_value);
+            if (svar2.compare(default_value) != 0) {
+                this->m_config->set_value("MASTERPORT", svar2.to_string());
+            }
+        }
+    }
+    ele = cep::find_element(xml, "ztpattr");
+    if (NULL != ele) {
+        svar1 = cep::name(*ele);
+        if (strcmp("ztpattr", svar1.data()) == 0) {
+            svar2 = cep::attribute(*ele, "bufmode", default_value);
+            if (svar2.compare(default_value) != 0) {
+                this->m_config->set_value("bufmode", svar2.to_string());
+            }
+            svar2 = cep::attribute(*ele, "propersize", default_value);
+            if (svar2.compare(default_value) != 0) {
+                this->m_config->set_value("propersize", svar2.to_string());
+            }
+            svar2 = cep::attribute(*ele, "maxmembufsize", default_value);
+            if (svar2.compare(default_value) != 0) {
+                this->m_config->set_value("maxmembufsize", svar2.to_string());
+            }
+            svar2 = cep::attribute(*ele, "maxfilesize", default_value);
+            if (svar2.compare(default_value) != 0) {
+                this->m_config->set_value("maxfilesize", svar2.to_string());
+            }
+            svar2 = cep::attribute(*ele, "pkgsize", default_value);
+            if (svar2.compare(default_value) != 0) {
+                this->m_config->set_value("pkgsize", svar2.to_string());
+            }
+            svar2 = cep::attribute(*ele, "encrypt", default_value);
+            if (svar2.compare(default_value) != 0) {
+                this->m_config->set_value("encrypt", svar2.to_string());
+            }
+            svar2 = cep::attribute(*ele, "compress", default_value);
+            if (svar2.compare(default_value) != 0) {
+                this->m_config->set_value("compress", svar2.to_string());
+            }
+            svar2 = cep::attribute(*ele, "compresslevel", default_value);
+            if (svar2.compare(default_value) != 0) {
+                this->m_config->set_value("compresslevel", svar2.to_string());
+            }
+            if (svar2.compare(default_value) != 0) {
+                this->m_config->set_value("maxbufcount", svar2.to_string());
+            }
+        }
+    }
+    ele = cep::find_element(xml, "connectors");
+    if (NULL == ele) {
+        return;
+    }
+    const cep::xml_element *ele_connector = cep::first_child(*ele);
+    while (ele_connector != NULL) {
+        svar1 = cep::name(*ele_connector);
+        unsigned short pnid = 0;
+        if (strcmp("connector", svar1.data()) == 0) {
+            svar2 = cep::attribute(*ele_connector, "serverpn", default_value);
+            if (svar2.compare(default_value) != 0) {
+                pnid = cep::cstr2nbr(svar2.data(), (unsigned int) 0);
+            }
+        }
+        const cep::xml_element *ele_event_temp = cep::first_child(*ele_connector);
+        while (ele_event_temp != NULL) {
+            svar1 = cep::name(*ele_event_temp);
+            if (strcmp("clientpn", svar1.data()) == 0) {
+                svar2 = cep::attribute(*ele_event_temp, "id", default_value);
+                if (svar2.compare(default_value) != 0) {
+                    unsigned short clientid = cep::cstr2nbr(svar2.data(), (unsigned short) 0);
+                    this->m_smatrix->insert(pnid, clientid, 0);
+                    MLOG_TRACE << "insert matrix[" << pnid << "][" << clientid << "]" << endl;
+                }
+            }
+            ele_event_temp = cep::next_sibling(*ele_event_temp);
+        }
+        ele_connector = cep::next_sibling(*ele_connector);
+    }
+}
+
+void CEPDispatch::initConfig(unsigned int localid) {
+    if (!this->m_smatrix) {
+        this->m_smatrix = new SMatrix(65535, 65535);
+    }
+    if (!this->m_config) {
+        this->m_config = new ConnConfig();
+    }
+    m_localid = localid;
+    assert(m_localid != 65535);
+    unsigned short port = m_config->get_value("MASTERPORT", (unsigned short) DEFAULT_MASTERPORT);
+    this->m_srvbuilder.m_port = port;
+    unsigned int bufmode = m_config->get_value("bufmode", (unsigned int) 0);
+    unsigned int propersize = m_config->get_size("propersize", (unsigned int) 0);
+    unsigned int maxfilesize = m_config->get_size("maxfilesize", (unsigned int) 0);
+    unsigned int pkgsize = m_config->get_size("pkgsize", (unsigned int) 0);
+    bool encrypt = m_config->get_value("encrypt", (bool) 0);
+    bool compress = m_config->get_value("compress", (bool) 0);
+    unsigned int compresslevel = m_config->get_value("compresslevel", (unsigned int) 0);
+    unsigned int maxbufcount = m_config->get_value("maxbufcount", (unsigned int) 0);
+    unsigned int maxbufsize = m_config->get_size("maxmembufsize", (unsigned int) 0);
+    if (maxbufsize > 1024 * 1024) {
+        this->m_srvbuilder.m_NetBufSetting.iMaxMemBufSize = maxbufsize;
+        this->m_clibuilder.m_NetBufSetting.iMaxMemBufSize = maxbufsize;
+    }
+    if (bufmode == 1) {
+        this->m_srvbuilder.m_NetBufSetting.BufMode = bufmode;
+        this->m_clibuilder.m_NetBufSetting.BufMode = bufmode;
+    }
+    if (port != 0) {
+        this->m_srvbuilder.m_port = port;
+    }
+    this->m_srvbuilder.m_localid = m_localid;
+    this->m_clibuilder.m_localid = m_localid;
+    if (propersize > 0x20000) {
+        this->m_srvbuilder.m_NetBufSetting.iProperSize = propersize;
+        this->m_clibuilder.m_NetBufSetting.iProperSize = propersize;
+    }
+    if (maxfilesize > 5 * 1024 * 1024) {
+        this->m_srvbuilder.m_NetBufSetting.dwMaxFileSize = maxfilesize;
+        this->m_clibuilder.m_NetBufSetting.dwMaxFileSize = maxfilesize;
+    }
+    if (pkgsize > 8 * 1024) {
+        this->m_srvbuilder.m_dwPktSize = pkgsize;
+        this->m_clibuilder.m_dwPktSize = pkgsize;
+    }
+    this->m_srvbuilder.m_bEncrypt = encrypt;
+    this->m_clibuilder.m_bEncrypt = encrypt;
+    this->m_clibuilder.m_bCompress = compress;
+    this->m_srvbuilder.m_bCompress = compress;
+    if (compresslevel >= 1 && compresslevel <= 9) {
+        this->m_srvbuilder.m_iCompressLevel = compresslevel;
+        this->m_clibuilder.m_iCompressLevel = compresslevel;
+    }
+    if (maxbufcount > 2 || maxbufcount < 100) {
+        this->m_srvbuilder.m_NetBufSetting.wMaxBufCount = maxbufcount;
+        this->m_clibuilder.m_NetBufSetting.wMaxBufCount = maxbufcount;
+    }
+}

@@ -1,0 +1,783 @@
+/* 
+ * File:   pn.cpp
+ * Author: WangquN
+ *
+ * Created on 2012-02-04 12:11
+ */
+
+#include "processing/pn.hpp"
+
+#include <vector>
+// #include <boost/date_time/posix_time/posix_time.hpp> // -lboost_date_time
+#include <time.h>
+
+#include "macro_log.hpp"
+#include "event.hpp"
+#include "utils_nbr2str.hpp"
+#include "utils_cstr2nbr.hpp"
+#include "processing/plugin_symbol.hpp"
+#include "processing/utils.hpp"
+#include "processing/pe.hpp"
+
+#include "communication/CEPDispatch.h"
+
+using namespace std;
+
+namespace cep {
+
+    struct config4pn {
+        size_t worker_count;
+        // unsigned int buffered_length, distributor_count;
+        // pn::pn_id_t pn_id;
+
+        struct pe {
+            cep::pe::pe_id_t pe_id;
+            cep::pn::pn_id_t pn_id;
+            const xml_element* xmle;
+            string so_path, config_url;
+        };
+
+        struct route {
+            cep::pe::pe_id_t begin_pe_id, end_pe_id;
+            string route_id;
+        };
+
+        vector<pe> config4pes;
+        vector<route> config4received_routes, config4processed_route;
+    };
+
+    ostream& operator<<(ostream& s, const config4pn& r) {
+        // s << &r << "->PN Id[" << r.pn_id << "] and worker count is " << r.worker_count << "\n PE:";
+        s << &r << "->PN worker count is " << r.worker_count << "\n PE:";
+        vector<config4pn::pe>::const_iterator itr = r.config4pes.begin();
+        vector<config4pn::pe>::const_iterator end = r.config4pes.end();
+        for (int i = 0; itr != end; ++itr, ++i) {
+            s << "\n\t" << i << ">PE[" << itr->pe_id << "]@PN["
+                    << itr->pn_id << "]@" << itr->xmle << " instance from [" << itr->so_path
+                    << "] and configuration at:" << itr->config_url;
+        }
+        s << "\n Route for received:";
+        vector<config4pn::route>::const_iterator itr2 = r.config4received_routes.begin();
+        vector<config4pn::route>::const_iterator end2 = r.config4received_routes.end();
+        for (int i = 0; itr2 != end2; ++itr2, ++i) {
+            s << "\n\t" << i << ">from PE[" << itr2->begin_pe_id << "] to PE["
+                    << itr2->end_pe_id << "] by:" << itr2->route_id;
+        }
+        s << "\n Route for processed:";
+        itr2 = r.config4processed_route.begin();
+        end2 = r.config4processed_route.end();
+        for (int i = 0; itr2 != end2; ++itr2, ++i) {
+            s << "\n\t" << i << ">from PE[" << itr2->begin_pe_id << "] to PE["
+                    << itr2->end_pe_id << "] by:" << itr2->route_id;
+        }
+        return s;
+    }
+
+    pn::pn() // must have a default constructor // id_("default_pn_id")
+    : mutex_(), running_(false), id_(0), /*config_(NULL),*/ url_(""), workers_(), router_()
+    , local_pes_(), remote_pes_(), pe_factory_(), plugin_func_factory_(), plugin_funcs_() {
+        tzset();
+        MLOG_INFO << this << "->pn default ctor execute!" << endl;
+    }
+
+    pn::~pn() {
+        MLOG_INFO << boost::this_thread::get_id() << "->" << *this << "::dtor executed!" << endl;
+        destroy();
+    }
+
+    /** const or must not failure properties initialization */
+    void pn::init(const pn_id_t& id, const string& url) {
+        id_ = id;
+        url_ = url;
+    }
+
+    bool pn::reload(const xml_element& config) {
+        MLOG_INFO << boost::this_thread::get_id() << "->" << *this << "::reload executed!" << endl;
+        destroy();
+        config4pn pn_config;
+#ifdef __DEBUG4HARD_CODING_PN_CONFIG__
+        // hard coding for test config4pn object!
+        // pn_config.pn_id = "first_test_pn";
+        pn_config.worker_count = 4;
+
+        config4pn::pe pe_config;
+        pe_config.pe_id = 1;
+        pe_config.so_path = "./libpe4time_series_grouping.so";
+        pe_config.config_url = "http://localhost/cep/config4pe?pe_id=1";
+        pe_config.pn_id = id_; // local pe!
+        pn_config.config4pes.push_back(pe_config);
+
+        pe_config.pe_id = 2;
+        pe_config.so_path = "./libpe4time_series_grouping.so";
+        pe_config.config_url = "http://localhost/cep/config4pe?pe_id=2";
+        pe_config.pn_id = id_; // local pe!
+        pn_config.config4pes.push_back(pe_config);
+
+        pe_config.pe_id = 20;
+        pe_config.so_path = "./libpe4time_series_grouping.so";
+        pe_config.config_url = "http://localhost/cep/config4pe?pe_id=20";
+        pe_config.pn_id = "reomte_pe_001";
+        pn_config.config4pes.push_back(pe_config);
+
+        config4pn::route route_config;
+        route_config.begin_pe_id = 1;
+        route_config.end_pe_id = 2;
+        pn_config.config4received_routes.push_back(route_config);
+
+        route_config;
+        route_config.begin_pe_id = 1;
+        route_config.end_pe_id = 20;
+        pn_config.config4processed_route.push_back(route_config);
+#else
+        cep::slice svar1, svar2, default_value("");
+        const xml_element* xle = cep::find_element(config, "pe");
+        bool pn_flag = false;
+        while (xle != NULL) {
+            config4pn::pe pe_config;
+            pe_config.xmle = xle;
+            /*svar1 = cep::value(*xle, default_value);
+            if (svar1.compare(default_value) != 0) {
+                pe_config.pe_id = cep::cstr2nbr(svar1.data(), (pe::pe_id_t) 0);
+            } else {
+                MLOG_WARN << this << "->pe config cant found pe id!" << endl;
+                return false;
+            }*/
+            svar1 = cep::attribute(*xle, "id", default_value);
+            if (svar1.compare(default_value) != 0) {
+                pe_config.pe_id = cep::cstr2nbr(svar1.data(), pe::INIT_PE_ID);
+            } else {
+                MLOG_WARN << this << "->pe config cant found pe id tag!" << endl;
+                return false;
+            }
+            svar1 = cep::attribute(*xle, "so_path", default_value);
+            if (svar1.compare(default_value) != 0) {
+                pe_config.so_path = svar1.data();
+            } else {
+                MLOG_WARN << this << "->pe config cant found so_path tag!" << endl;
+                return false;
+            }
+            svar1 = cep::attribute(*xle, "config_url", default_value);
+            if (svar1.compare(default_value) != 0) {
+                pe_config.config_url = svar1.data();
+            } else {
+                MLOG_WARN << this << "->pe config cant found config_url tag!" << endl;
+                return false;
+            }
+            svar1 = cep::attribute(*xle, "pn_id", default_value);
+            if (svar1.compare(default_value) != 0) {
+                pe_config.pn_id = cep::cstr2nbr(svar1.data(), (pn_id_t) 0);
+            } else {
+                pe_config.pn_id = id_;
+                MLOG_INFO << this << "->pe config has default pn_id which you set in!" << endl;
+            }
+            pn_config.config4pes.push_back(pe_config);
+            xle = cep::next_sibling(*xle);
+        }
+        xle = cep::find_element(config, "pn");
+        while (xle != NULL) {
+            config4pn::route route_config;
+            svar1 = cep::attribute(*xle, "worker_cnt", default_value);
+            pn_config.worker_count = cep::cstr2nbr(svar1.data(), (size_t) 0); // pn worker
+            // svar1 = cep::attribute(*xle, "pn_id", default_value);
+            // svar2 = id_;
+            // if (svar1.compare(svar2) == 0) {
+            if (id_ == cep::cstr2nbr(cep::attribute(*xle, "pn_id", default_value).data(), (pn_id_t) 0)) {
+                pn_flag = true;
+                const xml_element* linesetele = cep::find_element(*xle, "prolineset");
+                if (linesetele != NULL) {
+                    const xml_element* linele = cep::find_element(*linesetele, "line");
+                    if (linele == NULL)
+                        MLOG_WARN << this << "->Not fount line tag for prolineset!" << endl;
+                    while (linele != NULL) { // multi-line
+                        svar1 = cep::attribute(*linele, "begin", default_value);
+                        if (svar1.compare(default_value) != 0) {
+                            route_config.begin_pe_id = cep::cstr2nbr(svar1.data(), (pe::pe_id_t) 0);
+                        } else {
+                            MLOG_ERROR << this << "->PN configuration cant found processed route begin attribute for prolineset!" << endl;
+                            return false;
+                        }
+                        svar1 = cep::attribute(*linele, "end", default_value);
+                        if (svar1.compare(default_value) != 0) {
+                            route_config.end_pe_id = cep::cstr2nbr(svar1.data(), (pe::pe_id_t) 0);
+                        } else {
+                            MLOG_ERROR << this << "->PN configuration cant found processed route end attribute for prolineset!" << endl;
+                            return false;
+                        }
+                        route_config.route_id = cep::value(*linele, default_value).data();
+                        pn_config.config4processed_route.push_back(route_config);
+                        linele = cep::next_sibling(*linele);
+                    }
+                } else {
+                    MLOG_INFO << this << "->Not found prolineset tag, make sure you do not need it!" << endl;
+                }
+                linesetele = cep::find_element(*xle, "reclineset");
+                if (linesetele != NULL) {
+                    const xml_element* linele = cep::find_element(*linesetele, "line");
+                    if (linele == NULL)
+                        MLOG_WARN << this << "->Not fount line tag for reclineset!" << endl;
+                    while (linele != NULL) { // multi-line
+                        svar1 = cep::attribute(*linele, "begin", default_value);
+                        if (svar1.compare(default_value) != 0) {
+                            route_config.begin_pe_id = cep::cstr2nbr(svar1.data(), (pe::pe_id_t) 0);
+                        } else {
+                            MLOG_ERROR << this << "->PN configuration cant found received route begin attribute for reclineset!" << endl;
+                            return false;
+                        }
+                        svar1 = cep::attribute(*linele, "end", default_value);
+                        if (svar1.compare(default_value) != 0) {
+                            route_config.end_pe_id = cep::cstr2nbr(svar1.data(), (pe::pe_id_t) 0);
+                        } else {
+                            MLOG_ERROR << this << "->PN configuration cant found received route end attribute for reclineset!" << endl;
+                            return false;
+                        }
+                        route_config.route_id = cep::value(*linele, default_value).data();
+                        pn_config.config4received_routes.push_back(route_config);
+                        linele = cep::next_sibling(*linele);
+                    }
+                } else
+                    MLOG_INFO << this << "->Not found reclineset tag, make sure you do not need it!" << endl;
+            } else {
+                MLOG_INFO << this << "->It's not local PN[" << id_ << "] configuration, search next..." << endl;
+            }
+            xle = cep::next_sibling(*xle);
+        }
+        if (!pn_flag) { // load over
+            MLOG_ERROR << this << "->Not found local PN[" << id_ << "] configuration!" << endl;
+            return false;
+        }
+#endif // __DEBUG4HARD_CODING_PN_CONFIG__
+        MLOG_INFO << boost::this_thread::get_id() << "->PN@" << this
+                << " load configuration information successful!\n" << pn_config << endl;
+        // load configuration information!
+        workers_.size_controller().resize(pn_config.worker_count);
+
+        vector<config4pn::pe>::const_iterator itr4pe_config = pn_config.config4pes.begin();
+        vector<config4pn::pe>::const_iterator end4pe_config = pn_config.config4pes.end();
+        const dlhandler *dlh;
+        xml_document* doc;
+        // const xml_element *ele4pe_config;
+        load_pe_func_ptr_t ptr_load_pe;
+        pe_id2pe_map_t pe_id_map;
+        // pe_id2pe_map_t::value_type map_value;
+        pair < pe_id2pe_map_t::iterator, bool> insert_map_rst;
+        unsigned int local_pe_count = 0, remote_pe_count = 0;
+        for (int i = 0; itr4pe_config != end4pe_config; ++itr4pe_config, ++i) {
+            if (!pe_factory_.add_dlhandler(itr4pe_config->so_path)) {
+                MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                        << "::PN's PE factory add_dlhandler(" << itr4pe_config->so_path
+                        << ", RTLD_NOW) for PE[" << itr4pe_config->pe_id << "] failure!" << endl;
+                return false;
+            }
+            dlh = pe_factory_.get_dlhandler(itr4pe_config->so_path);
+            if (dlh == NULL) {
+                MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                        << "::PN's PE factory get_dlhandler(" << itr4pe_config->so_path
+                        << ") for PE[" << itr4pe_config->pe_id << "] failure!" << endl;
+                return false;
+            }
+            /*char *p = strstr(itr4pe_config->config_url.c_str(), "http:");
+            ele4pe_config = NULL;
+            if (p) { // from configuration server
+                // xml_document* parse_xmlstr(const char* xmlstr) {
+                string ele4pe_config_xml = "<config><pe_id>" + cep::nbr2str(itr4pe_config->pe_id)
+                        + "</pe_id><pn_id>" + itr4pe_config->pn_id + "</pn_id></config>";
+                cout << "ele4pe_config_xml:" << ele4pe_config_xml << endl;
+                ele4pe_config = cep::root_element(*cep::parse_xmlstr(ele4pe_config_xml.c_str()));
+                cout << "Fetch PE[" << itr4pe_config->pe_id << "] configuration from server is constructing..."
+                        << ele4pe_config << endl;
+            } else { // from configuration file
+                doc = load_xmlfile(itr4pe_config->config_url.c_str());
+                if (doc != NULL) ele4pe_config = root_element(*doc);
+            }
+            if (ele4pe_config == NULL) {
+                MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                        << "::Fetch PE[" << itr4pe_config->pe_id << "] configuration["
+                        << itr4pe_config->config_url << "] failure!" << endl;
+                return false;
+            } // delete ele4pe_config in pe dtor;*/
+            if (dlh->dlsymbol(CEP_MACRO2CSTR(CEP_LOAD_PE_FUNCTION), ptr_load_pe)) {
+                // pe* pe = ptr_load_pe(*ele4pe_config, config);
+                pe* pe = ptr_load_pe(*itr4pe_config->xmle, config);
+                if (!pe->init()) {
+                    MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                            << "::reload initialize PE[" << pe->id()
+                            << "]::init failure!" << endl;
+                    delete pe;
+                    return false;
+                }
+                // Attention PE multi-layer configuration file can avoid PE processing multi-description!
+                if (pe->id() != itr4pe_config->pe_id // check the PE instance Id
+                        || pe->pn_id() != itr4pe_config->pn_id) {
+                    MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                            << "::reload initialize PE Id is [" << pe->id() << '@' << pe->pn_id()
+                            << "] not equals configuration [" << itr4pe_config->pe_id
+                            << '@' << pe->pn_id() << "]!" << endl;
+                    delete pe;
+                    return false;
+                }
+                // map_value.first = itr4pe_config->pe_id;
+                // map_value.second = pe;
+                // insert_map_rst = pe_id_map.insert(map_value);
+                insert_map_rst = pe_id_map.insert(pe_id2pe_map_t::value_type(itr4pe_config->pe_id, pe));
+                if (!insert_map_rst.second) {
+                    MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                            << "::PN's PE Id[" << itr4pe_config->pe_id
+                            << "] is unique constraints!" << endl;
+                    delete pe;
+                    return false;
+                }
+                if (id_ == itr4pe_config->pn_id) { // local PE
+                    // local_pes_.insert(map_value);
+                    local_pes_.insert(pe_id2pe_map_t::value_type(itr4pe_config->pe_id, pe));
+                    ++local_pe_count;
+                } else { // remote PE
+                    // remote_pes_.insert(map_value);
+                    remote_pes_.insert(pe_id2pe_map_t::value_type(itr4pe_config->pe_id, pe));
+                    ++remote_pe_count;
+                }
+            } else {
+                MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                        << "::PN's PE factory dlhandler[" << itr4pe_config->so_path
+                        << "] fetch dlsymbol(" << CEP_MACRO2CSTR(CEP_LOAD_PE_FUNCTION)
+                        << ") for PE[" << itr4pe_config->pe_id << "] failure!" << strerror(errno) << endl;
+                return false;
+            }
+        }
+        router_.rebuild(local_pe_count, remote_pe_count);
+        vector<config4pn::route>::const_iterator itr4route_config = pn_config.config4received_routes.begin();
+        vector<config4pn::route>::const_iterator end4route_config = pn_config.config4received_routes.end();
+        pe_id2pe_map_t::const_iterator found, end4pe_id_map = pe_id_map.end();
+        pe *source, *destination;
+        for (int i = 0; itr4route_config != end4route_config; ++itr4route_config, ++i) {
+            source = NULL;
+            if (pe::INIT_PE_ID != itr4route_config->begin_pe_id) {
+                found = pe_id_map.find(itr4route_config->begin_pe_id);
+                if (found != end4pe_id_map)
+                    source = found->second;
+                else {
+                    MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                            << "::PN's received route[" << itr4route_config->route_id
+                            << "] begin PE[" << itr4route_config->begin_pe_id
+                            << "] is not found!" << endl;
+                    return false;
+                }
+                if (source == NULL) {
+                    MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                            << "::PN's received route[" << itr4route_config->route_id
+                            << "] begin PE[" << itr4route_config->begin_pe_id
+                            << "] is found NULL!" << endl;
+                    return false;
+                }
+            }
+            destination = NULL;
+            found = pe_id_map.find(itr4route_config->end_pe_id);
+            if (found != end4pe_id_map) destination = found->second;
+            if (destination == NULL) {
+                MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                        << "::PN's received route[" << itr4route_config->route_id
+                        << "] end PE[" << itr4route_config->end_pe_id
+                        << "] is not found!" << endl;
+                return false;
+            }
+            if (!router_.set_routing4received(source, *destination)) {
+                MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                        << "::PN's received route[" << itr4route_config->route_id
+                        << "] from PE[" << itr4route_config->begin_pe_id
+                        << "] to PE[" << itr4route_config->end_pe_id
+                        << "] failure!" << endl;
+                return false;
+            }
+        }
+        itr4route_config = pn_config.config4processed_route.begin();
+        end4route_config = pn_config.config4processed_route.end();
+        for (int i = 0; itr4route_config != end4route_config; ++itr4route_config, ++i) {
+            source = NULL;
+            if (pe::INIT_PE_ID != itr4route_config->begin_pe_id) {
+                found = pe_id_map.find(itr4route_config->begin_pe_id);
+                if (found != end4pe_id_map)
+                    source = found->second;
+                else {
+                    MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                            << "::PN's processed route[" << itr4route_config->route_id
+                            << "] begin PE[" << itr4route_config->begin_pe_id
+                            << "] is not found!" << endl;
+                    return false;
+                }
+                if (source == NULL) {
+                    MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                            << "::PN's processed route[" << itr4route_config->route_id
+                            << "] begin PE[" << itr4route_config->begin_pe_id
+                            << "] is found NULL!" << endl;
+                    return false;
+                }
+            }
+            destination = NULL;
+            found = pe_id_map.find(itr4route_config->end_pe_id);
+            if (found != end4pe_id_map) destination = found->second;
+            if (destination == NULL) {
+                MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                        << "::PN's processed route[" << itr4route_config->route_id
+                        << "] end PE[" << itr4route_config->end_pe_id
+                        << "] is not found!" << endl;
+                return false;
+            }
+            if (!router_.set_routing4processed(source, *destination)) {
+                MLOG_ERROR << boost::this_thread::get_id() << "->" << *this
+                        << "::PN's processed route[" << itr4route_config->route_id
+                        << "] from PE[" << itr4route_config->begin_pe_id
+                        << "] to PE[" << itr4route_config->end_pe_id
+                        << "] failure!" << endl;
+                return false;
+            }
+        }
+        MLOG_INFO << boost::this_thread::get_id() << "->" << *this
+                << " build router routing successful!" << endl;
+
+        pe_id2pe_map_t::iterator itr = local_pes_.begin();
+        pe_id2pe_map_t::iterator end = local_pes_.end();
+        for (; itr != end; ++itr) {
+            // itr->second->init(); // move to after load PE
+            if (!router_.set_node(*(itr->second))) {
+                MLOG_FATAL << boost::this_thread::get_id() << "->" << *this
+                        << "::reload failure for reload set local PE:" << itr->second << endl;
+                return false;
+            }
+            if (!itr->second->reload()) {
+                MLOG_FATAL << boost::this_thread::get_id() << "->" << *this
+                        << "::reload failure for reload local PE:" << itr->second << endl;
+                return false;
+            }
+        }
+        MLOG_INFO << boost::this_thread::get_id() << "->" << *this
+                << "::reload all local PE successfully!" << endl;
+        itr = remote_pes_.begin();
+        end = remote_pes_.end();
+        for (; itr != end; ++itr) {
+            // itr->second->init(); // move to after load PE
+            if (!router_.set_node(*(itr->second))) {
+                MLOG_FATAL << boost::this_thread::get_id() << "->" << *this
+                        << "::reload failure for reload set remote PE:" << itr->second << endl;
+                return false;
+            }
+        }
+        MLOG_INFO << boost::this_thread::get_id() << "->" << *this
+                << "::reload all remote PE initialize successfully and reset the route:\n"
+                << router_ << endl;
+        return true;
+    }
+
+    bool pn::startup() {
+        boost::mutex::scoped_lock lock(mutex_);
+        if (running_) return true;
+        MLOG_INFO << boost::this_thread::get_id() << "->" << *this << "::startup executing ..." << endl;
+        pe_id2pe_map_t::iterator itr = local_pes_.begin();
+        pe_id2pe_map_t::iterator end = local_pes_.end();
+        for (; itr != end; ++itr) { // TODO 简单按顺序shutdown PE，待改进为按拓扑结构shutdown
+            if (!itr->second->startup()) {
+                MLOG_FATAL << boost::this_thread::get_id() << "->" << *this
+                        << "::startup failure for startup local PE:" << itr->second << endl;
+                return false;
+            }
+            MLOG_DEBUG << boost::this_thread::get_id() << "->" << *this
+                    << "::startup successfully for local PE:" << itr->second << endl;
+        }
+        reset_counter();
+        running_ = true;
+        MLOG_INFO << boost::this_thread::get_id() << "->" << *this << "::startup executed!" << endl;
+        return true;
+    }
+
+    void pn::shutdown() {
+        if (!running_) return;
+        boost::mutex::scoped_lock lock(mutex_);
+        if (!running_) return;
+        MLOG_INFO << boost::this_thread::get_id() << "->" << *this << "::shutdown executing ..." << endl;
+        pe_id2pe_map_t::iterator itr = local_pes_.begin();
+        pe_id2pe_map_t::iterator end = local_pes_.end();
+        for (; itr != end; ++itr) { // TODO 简单按顺序shutdown PE，待改进为按拓扑结构shutdown
+            itr->second->shutdown();
+        }
+        MLOG_DEBUG << boost::this_thread::get_id() << "->" << *this
+                << "::shutdown all PE successfully!" << endl;
+        workers_.wait();
+        workers_.clear();
+        MLOG_DEBUG << boost::this_thread::get_id() << "->" << *this
+                << "::shutdown all worker in group[" << &workers_ << "] successfully!" << endl;
+        running_ = false;
+        destroy();
+        MLOG_INFO << boost::this_thread::get_id() << "->" << *this << "::shutdown executed!" << endl;
+    }
+
+    void pn::destroy() {
+        MLOG_INFO << boost::this_thread::get_id() << "->" << *this << "::destroy executed!" << endl;
+        shutdown();
+        /*if (config_ != NULL) {
+            delete config_;
+            config_ = NULL;
+        }*/
+
+        pe_id2pe_map_t::const_iterator itr = local_pes_.begin();
+        pe_id2pe_map_t::const_iterator end = local_pes_.end();
+        for (; itr != end; ++itr)
+            delete itr->second;
+        local_pes_.clear();
+
+        itr = remote_pes_.begin();
+        end = remote_pes_.end();
+        for (; itr != end; ++itr)
+            delete itr->second;
+        remote_pes_.clear();
+
+        pe_factory_.clear();
+        plugin_func_factory_.clear();
+        plugin_funcs_.clear();
+    }
+
+    void pn::push(const event& evt) {
+        ++push_counter_;
+        // distribute(evt);
+        /*if (!received_distribute(evt)) {
+            if (!processed_distribute(evt)) delete &evt;
+        } else {
+            event *ptr_evt = new event(evt);
+            if (!processed_distribute(evt)) delete ptr_evt;
+        }*/
+#ifndef __DEBUG4PN_NOT_SEND_EVENT_TO_REMOTE_PE__
+        pe * remote_pes[router_.remote_pe_count()];
+        pe * remote_pes4rcv[router_.remote_pe_count()];
+
+        const int remote_count = router_.routing4processed(evt, remote_pes, 'r');
+        const int remote_count4rcv = router_.routing4received(evt, remote_pes4rcv, 'r');
+
+        if (remote_count > 0)
+            for (int i = 0; i < remote_count; ++i)
+                CEPDispatch::instance().dispatch(evt, remote_pes[i]->pn_id());
+        if (remote_count4rcv > 0)
+            for (int i = 0; i < remote_count4rcv; ++i)
+                CEPDispatch::instance().dispatch(evt, remote_pes4rcv[i]->pn_id());
+#endif
+        pe * local_pes[router_.local_pe_count()];
+        pe * local_pes4rcv[router_.local_pe_count()];
+
+        const int local_count = router_.routing4processed(evt, local_pes);
+        const int local_count4rcv = router_.routing4received(evt, local_pes4rcv);
+
+        if (local_count > 0) {
+            event *ptr_evt;
+            if (local_count4rcv > 0) {
+                for (int i = 0; i < local_count; ++i) {
+                    ptr_evt = new event(evt);
+                    local_pes[i]->push(*ptr_evt);
+                }
+                int last_idx = local_count4rcv - 1;
+                for (int i = 0; i < local_count4rcv; ++i) {
+                    if (i < last_idx) {
+                        ptr_evt = new event(evt);
+                        local_pes4rcv[i]->push(*ptr_evt);
+                    } else
+                        local_pes4rcv[i]->push(evt);
+                }
+            } else {
+                int last_idx = local_count - 1;
+                for (int i = 0; i < local_count; ++i) {
+                    if (i < last_idx) {
+                        ptr_evt = new event(evt);
+                        local_pes[i]->push(*ptr_evt);
+                    } else
+                        local_pes[i]->push(evt);
+                }
+            }
+        } else if (local_count4rcv > 0) {
+            event *ptr_evt;
+            int last_idx = local_count4rcv - 1;
+            for (int i = 0; i < local_count4rcv; ++i) {
+                if (i < last_idx) {
+                    ptr_evt = new event(evt);
+                    local_pes4rcv[i]->push(*ptr_evt);
+                } else
+                    local_pes4rcv[i]->push(evt);
+            }
+        } else delete &evt;
+    }
+
+    /** routing to others pe after the current pe processed */
+    void pn::distribute4processed(const event& evt, const set<router::pe_id_t>* optinal_pe_id_set) const {
+        if (!processed_distribute(evt, optinal_pe_id_set)) delete &evt;
+    }
+
+    /** routing to others pe at the same time of current pe receiving */
+    void pn::distribute4received(const event& evt, const set<router::pe_id_t>* optinal_pe_id_set) const {
+        if (!received_distribute(evt, optinal_pe_id_set)) delete &evt;
+    }
+
+    /**
+     * not delete event memory version:
+     * routing to others pe after the current pe processed
+     */
+    bool pn::processed_distribute(const event& evt, const set<router::pe_id_t>* optinal_pe_id_set) const {
+        pe * local_pes[router_.local_pe_count()];
+        pe * remote_pes[router_.remote_pe_count()];
+
+        int local_count = router_.routing4processed(evt, local_pes);
+        const int remote_count = router_.routing4processed(evt, remote_pes, 'r');
+        const bool is_optinal = (optinal_pe_id_set != NULL);
+        if (is_optinal && optinal_pe_id_set->size() == 0) return false;
+
+        if (remote_count > 0) {
+            for (int i = 0; i < remote_count; ++i) {
+                if (is_optinal && optinal_pe_id_set->count(remote_pes[i]->id()) == 0) continue;
+#ifndef __DEBUG4PN_NOT_SEND_EVENT_TO_REMOTE_PE__
+                // evt.router_list().push_back(remote_pes[i]->pn_id());
+                // CRouteManager::instance()->send(&evt);
+                CEPDispatch::instance().dispatch(evt, remote_pes[i]->pn_id());
+#endif
+            }
+        }
+        if (local_count > 0) {
+            if (is_optinal) {
+                pe * optional_local_pes[local_count];
+                int optional_local_count = 0;
+                for (int i = 0; i < local_count; ++i) {
+                    if (is_optinal && optinal_pe_id_set->count(local_pes[i]->id()) == 0) continue;
+                    optional_local_pes[optional_local_count] = local_pes[i];
+                    ++optional_local_count;
+                }
+                if (optional_local_count == 0) return false;
+                else {
+                    local_count = optional_local_count;
+                    for (int i = 0; i < local_count; ++i)
+                        local_pes[i] = optional_local_pes[i];
+                }
+            }
+            int last_idx = local_count - 1;
+            event *ptr_evt;
+            for (int i = 0; i < local_count; ++i) {
+                if (/*remote_count > 0 ||*/ i < last_idx) {
+                    ptr_evt = new event(evt);
+                    local_pes[i]->push(*ptr_evt); // pe delete the new event!
+                } else
+                    local_pes[i]->push(evt);
+            }
+            return true;
+        } else
+            return false;
+        // if (local_count < 1 /*&& remote_count < 1*/) {
+        //     // if (evt is file event) then rename the file to .mm file for data load process
+        //     delete &evt; // the end of the process flow
+        // }
+    }
+
+    /**
+     * not delete event memory version:
+     * routing to others pe at the same time of current pe receiving
+     */
+    bool pn::received_distribute(const event& evt, const set<router::pe_id_t>* optinal_pe_id_set) const {
+        pe * local_pes[router_.local_pe_count()];
+        pe * remote_pes[router_.remote_pe_count()];
+
+        int local_count = router_.routing4received(evt, local_pes);
+        const int remote_count = router_.routing4received(evt, remote_pes, 'r');
+        // cout << "pn::distribute4received to event[" << evt.pe_id() << '@' << id_
+        //         << "] routing " << local_count << '/' << remote_count << endl;
+        const bool is_optinal = (optinal_pe_id_set != NULL);
+        if (is_optinal && optinal_pe_id_set->size() == 0) return false;
+
+        if (remote_count > 0) {
+            for (int i = 0; i < remote_count; ++i) {
+                if (is_optinal && optinal_pe_id_set->count(remote_pes[i]->id()) == 0) continue;
+#ifndef __DEBUG4PN_NOT_SEND_EVENT_TO_REMOTE_PE__
+                // evt.router_list().push_back(remote_pes[i]->pn_id());
+                // CRouteManager::instance()->send(&evt);
+                // cout << "CEPDispatch::dispatch to event[" << evt.pe_id() << '@' << id_ << "] to " << remote_pes[i]->pn_id() << endl;
+                CEPDispatch::instance().dispatch(evt, remote_pes[i]->pn_id());
+#endif
+            }
+        }
+        if (local_count > 0) {
+            if (is_optinal) {
+                pe * optional_local_pes[local_count];
+                int optional_local_count = 0;
+                for (int i = 0; i < local_count; ++i) {
+                    if (is_optinal && optinal_pe_id_set->count(local_pes[i]->id()) == 0) continue;
+                    optional_local_pes[optional_local_count] = local_pes[i];
+                    ++optional_local_count;
+                }
+                if (optional_local_count == 0) return false;
+                else {
+                    local_count = optional_local_count;
+                    for (int i = 0; i < local_count; ++i)
+                        local_pes[i] = optional_local_pes[i];
+                }
+            }
+            int last_idx = local_count - 1;
+            event *ptr_evt;
+            for (int i = 0; i < local_count; ++i) {
+                if (/*remote_count > 0 ||*/ i < last_idx) {
+                    ptr_evt = new event(evt);
+                    local_pes[i]->push(*ptr_evt); // pe delete the new event!
+                } else
+                    local_pes[i]->push(evt);
+            }
+            return true;
+        } else
+            return false;
+        // if (local_count < 1 /*&& remote_count < 1*/) {
+        //     // if (evt is file event) then rename the file to .mm file for data load process
+        //     delete &evt; // the end of the process flow
+        // }
+    }
+
+    /** uniform schedule asynchronous task in pool */
+    bool pn::schedule(const boost::threadpool::pool::task_type & task) {
+        return workers_.schedule(task);
+    }
+
+    void pn::reset_counter() const {
+        push_counter_ = 0;
+        pop_counter_ = 0;
+        time_ms_ = processing_utils::systime_msec();
+    }
+
+    unsigned long pn::push_counter() const {
+        return push_counter_;
+    }
+
+    unsigned long pn::pop_counter() const {
+        return pop_counter_;
+    }
+
+    double pn::push_speed() const {
+        return (push_counter_ * (double) 1000) / (processing_utils::systime_msec() - time_ms_);
+    }
+
+    double pn::pop_speed() const {
+        return (pop_counter_ * (double) 1000) / (processing_utils::systime_msec() - time_ms_);
+    }
+
+    void pn::logging() const {
+        cout << "******************************** PN & PEs speed log ********************************" << endl;
+        MLOG_INFO << "UTC:" << cep::milsecond2str(cep::processing_utils::systime_msec(), "%4d-%02d-%02d %02d:%02d:%02d") << endl;
+        MLOG_INFO << boost::this_thread::get_id() << ' ' << *this
+                << "\n pn::speed is " << push_speed() << '/' << pop_speed()
+                << '(' << push_counter_ << '/' << pop_counter_ << ')' << endl;
+        cout << "------------------------------------------------------------------------------------" << endl;
+        pe_id2pe_map_t::const_iterator itr = local_pes_.begin();
+        pe_id2pe_map_t::const_iterator end = local_pes_.end();
+        for (; itr != end; ++itr) {
+            itr->second->logging();
+            cout << endl;
+        }
+        cout << "------------------------------------------------------------------------------------" << endl;
+        // MLOG_INFO << boost::posix_time::to_iso_string(boost::posix_time::second_clock::local_time()) << endl;
+        MLOG_INFO << "Locale time:" << cep::milsecond2str(cep::processing_utils::systime_msec() - timezone * 1000,
+                "%4d-%02d-%02d %02d:%02d:%02d") << endl;
+        MLOG_INFO << boost::this_thread::get_id() << ' ' << *this
+                << "\n pn::speed is " << push_speed() << '/' << pop_speed()
+                << '(' << push_counter_ << '/' << pop_counter_ << ')' << endl;
+        reset_counter();
+    }
+
+    std::ostream& operator<<(std::ostream& s, const pn & r) {
+        return s << &r << "->pn id=" << r.id_ << ", url=" << r.url_;
+    }
+}

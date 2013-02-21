@@ -1,0 +1,282 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configurationDescriptor version="84">
+  <logicalFolder name="root" displayName="root" projectFiles="true" kind="ROOT">
+    <logicalFolder name="HeaderFiles" displayName="头文件" projectFiles="true">
+      <logicalFolder name="f1" displayName="communication" projectFiles="true">
+        <logicalFolder name="f1" displayName="baseutils" projectFiles="true">
+          <itemPath>include/communication/baseutils/Encrypt.h</itemPath>
+          <itemPath>include/communication/baseutils/FSPublic.h</itemPath>
+          <itemPath>include/communication/baseutils/TCPClientNode.h</itemPath>
+          <itemPath>include/communication/baseutils/TCPServer.h</itemPath>
+          <itemPath>include/communication/baseutils/TCPSocket.h</itemPath>
+          <itemPath>include/communication/baseutils/ZTPClient.h</itemPath>
+          <itemPath>include/communication/baseutils/ZTPSendThread.h</itemPath>
+          <itemPath>include/communication/baseutils/ZTPServer.h</itemPath>
+          <itemPath>include/communication/baseutils/ZTPServerHandler.h</itemPath>
+          <itemPath>include/communication/baseutils/config.h</itemPath>
+          <itemPath>include/communication/baseutils/growbuf.h</itemPath>
+          <itemPath>include/communication/baseutils/lzowrapper.h</itemPath>
+          <itemPath>include/communication/baseutils/mmap.h</itemPath>
+          <itemPath>include/communication/baseutils/netiobuf.h</itemPath>
+        </logicalFolder>
+        <logicalFolder name="f2" displayName="lzo" projectFiles="true">
+          <itemPath>include/communication/lzo/lzo1.h</itemPath>
+          <itemPath>include/communication/lzo/lzo1a.h</itemPath>
+          <itemPath>include/communication/lzo/lzo1b.h</itemPath>
+          <itemPath>include/communication/lzo/lzo1c.h</itemPath>
+          <itemPath>include/communication/lzo/lzo1f.h</itemPath>
+          <itemPath>include/communication/lzo/lzo1x.h</itemPath>
+          <itemPath>include/communication/lzo/lzo1y.h</itemPath>
+          <itemPath>include/communication/lzo/lzo1z.h</itemPath>
+          <itemPath>include/communication/lzo/lzo2a.h</itemPath>
+          <itemPath>include/communication/lzo/lzo_asm.h</itemPath>
+          <itemPath>include/communication/lzo/lzoconf.h</itemPath>
+          <itemPath>include/communication/lzo/lzodefs.h</itemPath>
+          <itemPath>include/communication/lzo/lzoutil.h</itemPath>
+        </logicalFolder>
+        <itemPath>include/communication/CEPConnHandler.h</itemPath>
+        <itemPath>include/communication/CEPDispatch.h</itemPath>
+        <itemPath>include/communication/ConnConfig.h</itemPath>
+        <itemPath>include/communication/SMatrixOL.h</itemPath>
+      </logicalFolder>
+      <logicalFolder name="f2" displayName="processing" projectFiles="true">
+        <itemPath>include/processing/forest_map.h</itemPath>
+        <itemPath>include/processing/idx_range.hpp</itemPath>
+        <itemPath>include/processing/idx_rbtree.hpp</itemPath>
+        <itemPath>include/processing/idx_trie_tree.hpp</itemPath>
+        <itemPath>include/processing/pe.hpp</itemPath>
+        <itemPath>include/processing/pe4initest.hpp</itemPath>
+        <itemPath>include/processing/plugin_function.hpp</itemPath>
+        <itemPath>include/processing/plugin_symbol.hpp</itemPath>
+        <itemPath>include/processing/pn.hpp</itemPath>
+        <itemPath>include/processing/router.hpp</itemPath>
+        <itemPath>include/processing/trie_map_tree.hpp</itemPath>
+        <itemPath>include/processing/utils.hpp</itemPath>
+      </logicalFolder>
+      <logicalFolder name="f3" displayName="tinyxml" projectFiles="true">
+        <itemPath>include/tinystr.h</itemPath>
+        <itemPath>include/tinyxml.h</itemPath>
+      </logicalFolder>
+      <itemPath>include/buffer_function.hpp</itemPath>
+      <itemPath>include/buffer_metadata.hpp</itemPath>
+      <itemPath>include/buffer_utility.hpp</itemPath>
+      <itemPath>include/buffered_queue.hpp</itemPath>
+      <itemPath>include/cep_base.hpp</itemPath>
+      <itemPath>include/circular_queue.hpp</itemPath>
+      <itemPath>include/config_metadata.hpp</itemPath>
+      <itemPath>include/const_dataset.hpp</itemPath>
+      <itemPath>include/dlhandler.hpp</itemPath>
+      <itemPath>include/dynamic_struct.hpp</itemPath>
+      <itemPath>include/event.hpp</itemPath>
+      <itemPath>include/event2text.hpp</itemPath>
+      <itemPath>include/file_lock_counter.hpp</itemPath>
+      <itemPath>include/macro_log.hpp</itemPath>
+      <itemPath>include/sigsegv.h</itemPath>
+      <itemPath>include/singleton.hpp</itemPath>
+      <itemPath>include/slice.hpp</itemPath>
+      <itemPath>include/system_config.h</itemPath>
+      <itemPath>include/utils_cstr2nbr.hpp</itemPath>
+      <itemPath>include/utils_nbr2str.hpp</itemPath>
+      <itemPath>include/utils_time.h</itemPath>
+      <itemPath>include/utils_xml.hpp</itemPath>
+    </logicalFolder>
+    <logicalFolder name="SourceFiles" displayName="源文件" projectFiles="true">
+      <logicalFolder name="src" displayName="src" projectFiles="true">
+        <logicalFolder name="communication"
+                       displayName="communication"
+                       projectFiles="true">
+          <logicalFolder name="f1" displayName="baseutils" projectFiles="true">
+            <itemPath>src/communication/baseutils/TCPClientNode.cpp</itemPath>
+            <itemPath>src/communication/baseutils/TCPServer.cpp</itemPath>
+            <itemPath>src/communication/baseutils/TCPSocket.cpp</itemPath>
+            <itemPath>src/communication/baseutils/ZTPClient.cpp</itemPath>
+            <itemPath>src/communication/baseutils/ZTPSendThread.cpp</itemPath>
+            <itemPath>src/communication/baseutils/ZTPServer.cpp</itemPath>
+            <itemPath>src/communication/baseutils/ZTPServerHandler.cpp</itemPath>
+            <itemPath>src/communication/baseutils/growbuf.cpp</itemPath>
+            <itemPath>src/communication/baseutils/mmap.cpp</itemPath>
+            <itemPath>src/communication/baseutils/netiobuf.cpp</itemPath>
+          </logicalFolder>
+          <itemPath>src/communication/CEPConnHandler.cpp</itemPath>
+          <itemPath>src/communication/CEPDispatch.cpp</itemPath>
+          <itemPath>src/communication/ConnConfig.cpp</itemPath>
+          <itemPath>src/communication/cdrclient.cpp</itemPath>
+        </logicalFolder>
+        <logicalFolder name="processing" displayName="processing" projectFiles="true">
+          <itemPath>src/processing/forest_map.cpp</itemPath>
+          <itemPath>src/processing/idx_range.cpp</itemPath>
+          <itemPath>src/processing/idx_rbtree.cpp</itemPath>
+          <itemPath>src/processing/idx_trie_tree.cpp</itemPath>
+          <itemPath>src/processing/pe4initest.cpp</itemPath>
+          <itemPath>src/processing/plugin_function.cpp</itemPath>
+          <itemPath>src/processing/pn.cpp</itemPath>
+          <itemPath>src/processing/router.cpp</itemPath>
+          <itemPath>src/processing/trie_map_tree.cpp</itemPath>
+        </logicalFolder>
+        <logicalFolder name="f1" displayName="tinyxml" projectFiles="true">
+          <itemPath>src/tinystr.cpp</itemPath>
+          <itemPath>src/tinyxml.cpp</itemPath>
+          <itemPath>src/tinyxmlerror.cpp</itemPath>
+          <itemPath>src/tinyxmlparser.cpp</itemPath>
+        </logicalFolder>
+        <itemPath>src/buffer_function.cpp</itemPath>
+        <itemPath>src/buffer_metadata.cpp</itemPath>
+        <itemPath>src/circular_queue.cpp</itemPath>
+        <itemPath>src/config_metadata.cpp</itemPath>
+        <itemPath>src/const_dataset.cpp</itemPath>
+        <itemPath>src/dlhandler.cpp</itemPath>
+        <itemPath>src/dynamic_struct.cpp</itemPath>
+        <itemPath>src/event2text.cpp</itemPath>
+        <itemPath>src/sigsegv.cpp</itemPath>
+        <itemPath>src/system_config.cpp</itemPath>
+        <itemPath>src/utils_cstr2nbr.cpp</itemPath>
+        <itemPath>src/utils_nbr2str.cpp</itemPath>
+        <itemPath>src/utils_time.cpp</itemPath>
+        <itemPath>src/utils_xml.cpp</itemPath>
+      </logicalFolder>
+      <itemPath>main.cpp</itemPath>
+      <itemPath>unitest_main.cpp</itemPath>
+    </logicalFolder>
+    <logicalFolder name="ResourceFiles" displayName="资源文件" projectFiles="true">
+      <logicalFolder name="nbproject" displayName="nbproject" projectFiles="true">
+        <itemPath>nbproject/Makefile-Debug.mk</itemPath>
+        <itemPath>nbproject/Makefile-Release.mk</itemPath>
+        <itemPath>nbproject/Makefile-impl.mk</itemPath>
+        <itemPath>nbproject/Makefile-variables.mk</itemPath>
+        <itemPath>nbproject/Package-Debug.bash</itemPath>
+        <itemPath>nbproject/Package-Release.bash</itemPath>
+        <itemPath>nbproject/configurations.xml</itemPath>
+        <itemPath>nbproject/project.properties</itemPath>
+        <itemPath>nbproject/project.xml</itemPath>
+      </logicalFolder>
+      <itemPath>Makefile</itemPath>
+    </logicalFolder>
+    <logicalFolder name="TestFiles"
+                   displayName="测试文件"
+                   projectFiles="false"
+                   kind="TEST_LOGICAL_FOLDER">
+    </logicalFolder>
+    <logicalFolder name="ExternalFiles"
+                   displayName="重要文件"
+                   projectFiles="false"
+                   kind="IMPORTANT_FILES_FOLDER">
+      <itemPath>Makefile</itemPath>
+    </logicalFolder>
+  </logicalFolder>
+  <sourceRootList>
+    <Elem>include</Elem>
+    <Elem>src</Elem>
+    <Elem>nbproject</Elem>
+  </sourceRootList>
+  <projectmakefile>Makefile</projectmakefile>
+  <confs>
+    <conf name="Debug" type="2">
+      <toolsSet>
+        <remote-sources-mode>LOCAL_SOURCES</remote-sources-mode>
+        <compilerSet>GNU|GNU</compilerSet>
+      </toolsSet>
+      <compileType>
+        <cTool>
+          <developmentMode>6</developmentMode>
+        </cTool>
+        <ccTool>
+          <developmentMode>6</developmentMode>
+          <incDir>
+            <pElem>include</pElem>
+          </incDir>
+          <preprocessorList>
+            <Elem>MLOG_LEVEL=0</Elem>
+            <Elem>__FLAG4INHERITABLE__cancel</Elem>
+            <Elem>__VER4QUEUE_BLOCKING_SLEEP__cancel</Elem>
+            <Elem>__VER4QUEUE_MT_WRAP__cancle</Elem>
+            <Elem>__VER4TEST_TEMPLATE_SPECIALIZATION__cancel</Elem>
+            <Elem>__WORDSIZE=64</Elem>
+          </preprocessorList>
+        </ccTool>
+        <linkerTool>
+          <linkerAddLib>
+            <pElem>/usr/local/lib</pElem>
+            <pElem>/usr/lib64/</pElem>
+            <pElem>lib</pElem>
+          </linkerAddLib>
+          <linkerLibItems>
+            <linkerOptionItem>-llzo2</linkerOptionItem>
+          </linkerLibItems>
+          <commandLine>-Wl,-G,-brtl,-bdynamic</commandLine>
+        </linkerTool>
+      </compileType>
+      <item path="include/sigsegv.h" ex="true" tool="3" flavor2="0">
+      </item>
+      <item path="src/communication/cdrclient.cpp" ex="true" tool="1" flavor2="0">
+      </item>
+      <item path="src/sigsegv.cpp" ex="true" tool="1" flavor2="0">
+      </item>
+      <item path="unitest_main.cpp" ex="true" tool="1" flavor2="0">
+      </item>
+    </conf>
+    <conf name="Release" type="1">
+      <toolsSet>
+        <remote-sources-mode>LOCAL_SOURCES</remote-sources-mode>
+        <compilerSet>GNU|GNU</compilerSet>
+      </toolsSet>
+      <compileType>
+        <cTool>
+          <commandLine>-std=c++0x</commandLine>
+        </cTool>
+        <ccTool>
+          <developmentMode>5</developmentMode>
+          <incDir>
+            <pElem>include</pElem>
+          </incDir>
+          <commandLine>-g</commandLine>
+          <preprocessorList>
+            <Elem>MLOG_LEVEL=0</Elem>
+            <Elem>__FLAG4INHERITABLE__cancel</Elem>
+            <Elem>__VER4QUEUE_BLOCKING_SLEEP__cancel</Elem>
+            <Elem>__VER4QUEUE_MT_WRAP__</Elem>
+            <Elem>__VER4SIGSEGV_PRINT_BACKTRACE__cancel</Elem>
+            <Elem>__VER4TEST_TEMPLATE_SPECIALIZATION__cancel</Elem>
+          </preprocessorList>
+        </ccTool>
+        <fortranCompilerTool>
+          <developmentMode>5</developmentMode>
+        </fortranCompilerTool>
+        <asmTool>
+          <developmentMode>5</developmentMode>
+        </asmTool>
+        <linkerTool>
+          <linkerAddLib>
+            <pElem>lib</pElem>
+          </linkerAddLib>
+          <commandlineTool>g++</commandlineTool>
+          <linkerLibItems>
+            <linkerLibStdlibItem>PosixThreads</linkerLibStdlibItem>
+            <linkerLibLibItem>boost_thread</linkerLibLibItem>
+            <linkerLibStdlibItem>DynamicLinking</linkerLibStdlibItem>
+            <linkerOptionItem>-llzo2</linkerOptionItem>
+            <linkerOptionItem>-lboost_filesystem</linkerOptionItem>
+          </linkerLibItems>
+          <commandLine>-rdynamic</commandLine>
+        </linkerTool>
+      </compileType>
+      <folder path="HeaderFiles/f1">
+        <ccTool>
+          <incDir>
+            <pElem>include/communication</pElem>
+          </incDir>
+        </ccTool>
+      </folder>
+      <folder path="HeaderFiles/f2">
+        <ccTool>
+          <incDir>
+            <pElem>include/processing</pElem>
+          </incDir>
+        </ccTool>
+      </folder>
+      <item path="src/communication/cdrclient.cpp" ex="true" tool="1" flavor2="0">
+      </item>
+      <item path="unitest_main.cpp" ex="true" tool="1" flavor2="0">
+      </item>
+    </conf>
+  </confs>
+</configurationDescriptor>

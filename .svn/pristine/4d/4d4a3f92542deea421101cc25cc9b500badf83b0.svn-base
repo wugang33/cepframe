@@ -1,0 +1,245 @@
+#ifndef __ZTP_SEND_THREAD_H__
+#define __ZTP_SEND_THREAD_H__
+
+#include "communication/baseutils/ZTPServer.h"
+#include "communication/baseutils/lzowrapper.h"
+#include "communication/baseutils/netiobuf.h"
+#include "boost/thread.hpp"
+
+typedef enum {
+    EN_INVALIDSOCKET = 0,
+    EN_AUTHFAILED,
+    EN_INVALIDPROTO,
+    EN_SELFCLOSE,
+    EN_TIMEOUT,
+    EN_INVALIDCHKSUM,
+    EN_PAD1,
+    EN_PAD2,
+    EN_TOTAL_CAUSE
+} ENUMCAUSE;
+
+typedef struct _TCPCause {
+    WORD Cause[EN_TOTAL_CAUSE];
+} TCPCause;
+
+typedef struct _FlowStatic {
+    UINT64 SucSndB; //0x20
+    UINT64 SndPkt; //0x28
+    UINT64 SucRcvB; //0x30
+    UINT64 RecvPkt; //0x38
+    UINT64 DiscardB; //0x40
+    UINT64 DiscardPkt;
+
+    friend std::ostream& operator<<(std::ostream&out, const _FlowStatic & flow) {
+        out << "\nSTATIC:succfulsendbyte[" << flow.SucSndB << "]\tsendpackage[" << flow.SndPkt <<
+                "]\tsuccfulrecvbyte[" << flow.SucRcvB << "]\trecvpackages[" << flow.RecvPkt
+                << "]\tdiscardbyte[" << flow.DiscardB << "]\tdiscardpackage[" << flow.DiscardPkt << "]\n";
+    }
+} FlowStatic;
+
+typedef struct _ZTPNetInfo {
+    NetBufInfo pBufInfo; // 缓存信息 0x00
+    FlowStatic flow; //0x20
+    WORD dwCause; // 上次断线原因值//0x50
+    WORD dwConnTimes; // 连接次数
+    WORD dwConnFailed; // 失败次数
+    WORD dwCloseTimes; // 断连次数
+    WORD dwIdleTimes; //空闲次数 select超时的次数
+    BYTE ConnStat; // 当前连接状态//0x58
+    BYTE Congest; // 是否拥塞	
+    BYTE pad[4];
+    sockaddr_in remote;
+    sockaddr_in local;
+    TCPCause CauseCounter; // 失败原因统计
+
+    friend std::ostream& operator<<(std::ostream&out, const _ZTPNetInfo & info) {
+        out << "\nNETINFO:peerip[" << inet_ntoa(info.remote.sin_addr) << "]\tpeerport[" << convert_16_ex(info.remote.sin_port) << "]" << endl;
+        out << info.pBufInfo << info.flow << "IdleSecondMin[" << info.dwIdleTimes << "]\tlastoffcause[" << info.dwCause << "]\tconntimes[" << info.dwConnTimes << "]\tfailtimes[" << info.dwConnFailed
+                << "]\tclosetimes[" << info.dwCloseTimes << "]\tcurrentstate[" << (unsigned) info.ConnStat << "]\tcongest[" << (unsigned) info.Congest << "]\n";
+    }
+
+} ZTPNetInfo;
+
+class ZTPNetStat;
+
+/*
+ @brief 实现发送缓冲区和发送线程
+ */
+class ZTPSendThread : public ZTPService {
+public:
+    /*
+     @brief 发送线程，服务端和客户端都可以使用。
+
+ 维护一个发送缓存，负责发送数据。
+     @param conn 连接对象
+     @param hndl 回调句柄
+     @param is_client 是否时客户端
+
+ @note 在客户端运行时，在遇到写入数据失败时不会退出线程，而是等待客户端重新连接。
+     在服务端运行时，在遇到写入失败时立即退出线程，因为服务端无法发起重连。
+     */
+    ZTPSendThread(TCPSocket * conn, ZTPHandler * hndl, bool is_client, NetBufSetting * _pNetBufSetting,
+            bool bSendEncrypt = false, bool bSendCompress = false, int iPkgSize = 8 * 1024, BYTE icompresslev = COMPRESS_LEVEL_FAST);
+    virtual ~ZTPSendThread();
+    virtual bool SendData(const void * buf, ZTP_DATA_INFO * info);
+    virtual bool SendData(const void * buf_head, UINT head_len, const void * buf, ZTP_DATA_INFO * info);
+    virtual bool SendPacket(WORD cmd, WORD cmd_status, const void * buf, size_t len);
+    virtual void Close();
+    bool FileCacheEnable();
+
+    int GetPktBufLen() {
+        return m_pkgbuflen;
+    }
+
+    int GetPktSize() {
+        return m_pkgsize;
+    }
+
+    int GetInPos() {
+        BYTE * pBuf = NULL;
+        int pos = 0;
+
+        m_pIoBuf->GetCrntInBuf(pBuf, pos);
+        return pos;
+    }
+
+    BYTE * GetInBuf() {
+        BYTE * pBuf = NULL;
+        int pos = 0;
+
+        m_pIoBuf->GetCrntInBuf(pBuf, pos);
+        return pBuf;
+    }
+
+    ZTPNetInfo * GetNetInfo();
+
+    void start() {
+        if (this->thread_)return;
+        this->isrunning = true;
+        this->thread_ = new boost::thread(boost::bind(&ZTPSendThread::run, this));
+    }
+
+    void stop() {
+        this->isrunning = false;
+        if (this->thread_) {
+            this->thread_->join();
+            delete this->thread_;
+            this->thread_ = 0;
+        }
+    }
+protected:
+    void run();
+private:
+    void doSend();
+    bool addToPkg(const void * buf, ZTP_DATA_INFO * info); // 将小包加入到大包
+    bool addPkgToSendBuf(); // 将大包加入到发送缓冲池
+    bool addSuperLenPkgToSendBuf(const void * buf, ZTP_DATA_INFO * info); // 超长包分包发送
+    boost::thread * thread_;
+    bool isrunning;
+    TCPSocket * m_socket; //0xc8
+    ZTPHandler * m_handler; //0xd0
+    ZTPNetStat * m_pConnStat; //0xd8
+    NetIOBuf * m_pIoBuf; //0xe0
+    boost::mutex m_lock; //0xe8
+    BYTE * m_pkgBuf; // 大包缓冲区0x118
+    int m_pkgbuflen; // 大包缓冲区长度0x120
+    int m_pkgsize; // 打包大小0x124
+    bool m_is_client; //0x128
+    bool m_bSendEncrypt; // 是否加密//0x129
+    CLzoWrapper m_lzo; //0x130
+    BYTE *m_lzobuf; //0x140
+    int m_lzobuflen; //0x148
+    bool m_bSendCompress; // 是否压缩
+
+};
+
+class ZTPNetStat : public TCPStat, public MMapBuf {
+public:
+
+    ZTPNetStat()
+    : MMapBuf(MMAPFILE, sizeof (ZTPNetInfo)) {
+        m_ZTPNetInfo = NULL;
+        m_pNetBufStat = NULL;
+    }
+
+    ~ZTPNetStat();
+
+    bool Init(const char *pFile = NULL, bool bPostStat = false, int infosize = 0);
+
+    void SetBufStat(NetBufStat * _pStat) {
+        m_pNetBufStat = _pStat;
+    }
+
+    void ConnClose(BYTE cause) {
+        m_pNetBufStat->ConnClose(cause);
+        m_ZTPNetInfo->dwCause = cause;
+        m_ZTPNetInfo->CauseCounter.Cause[cause]++;
+        m_ZTPNetInfo->dwCloseTimes++;
+        m_ZTPNetInfo->ConnStat = 0;
+    }
+
+    void Connect(const sockaddr_in * remote, const sockaddr_in * local) {
+        m_pNetBufStat->Connect(remote, local);
+        m_ZTPNetInfo->dwConnTimes++;
+        m_ZTPNetInfo->ConnStat = 1;
+        m_ZTPNetInfo->remote = *remote;
+        m_ZTPNetInfo->local = *local;
+    }
+
+    void ReConn(const sockaddr_in * remote, const sockaddr_in * local) {
+        m_pNetBufStat->ReConn(remote, local);
+        m_ZTPNetInfo->dwConnTimes++;
+        m_ZTPNetInfo->ConnStat = 1;
+        m_ZTPNetInfo->remote = *remote;
+        m_ZTPNetInfo->local = *local;
+    }
+
+    void Idle() {
+        m_ZTPNetInfo->dwIdleTimes++;
+    }
+
+    void ClearIdle() {
+        m_ZTPNetInfo->dwIdleTimes = 0;
+    }
+
+    void Congestion() {
+        m_pNetBufStat->Congestion();
+        m_ZTPNetInfo->Congest = 1;
+    }
+
+    void Discard(INT iDataLen, INT iPkt) {
+        m_ZTPNetInfo->flow.DiscardB += iDataLen;
+        m_ZTPNetInfo->flow.DiscardPkt += iPkt;
+    }
+
+    void Send(INT iDataLen, INT iPkt) {
+        m_ZTPNetInfo->flow.SucSndB += iDataLen;
+        m_ZTPNetInfo->flow.SndPkt += iPkt;
+    }
+
+    void Recv(INT iDataLen, INT iPkt) {
+        m_ZTPNetInfo->flow.SucRcvB += iDataLen;
+        m_ZTPNetInfo->flow.RecvPkt += iPkt;
+    }
+
+    void * GetStatInfo() {
+        if (m_pNetBufStat)
+            m_pNetBufStat->Dump();
+        return m_ZTPNetInfo;
+    }
+
+    bool IsConn() {
+        return m_ZTPNetInfo->ConnStat ? true : false;
+    }
+
+    WORD ConnTimes() {
+        return m_ZTPNetInfo->dwConnTimes;
+    }
+
+private:
+    NetBufStat * m_pNetBufStat; //90h   sizeof(MMapBuf)==0x88h
+    ZTPNetInfo * m_ZTPNetInfo; //98h
+    static UINT s_counter; //100h
+};
+
+#endif

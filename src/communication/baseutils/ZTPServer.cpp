@@ -1,0 +1,171 @@
+#include "communication/baseutils/ZTPServer.h"
+#include "communication/baseutils/ZTPServerHandler.h"
+
+std::ostream& operator<<(std::ostream& s, const ZTPServer::Builder& r) {
+    s << &r << "::PORT[" << r.m_port
+            << "] BufMod[" << (int) r.m_NetBufSetting.BufMode
+            << "] MaxMemBufSize[" << r.m_NetBufSetting.iMaxMemBufSize
+            << "] MaxFileSize[" << r.m_NetBufSetting.dwMaxFileSize
+            << "] ProperSize[" << r.m_NetBufSetting.iProperSize
+            << "] MaxBufCount[" << r.m_NetBufSetting.wMaxBufCount
+            << "] Compress[" << r.m_bCompress
+            << "] CompressLevel[" << (int) r.m_iCompressLevel
+            << "] Encrypt[" << r.m_bEncrypt
+            << "] PktSize[" << r.m_dwPktSize
+            << "] LocalPNID[" << r.m_localid
+            << ']';
+    return s;
+}
+
+class SendDataAction : public TCPServer::Action {
+public:
+
+    SendDataAction(const void *data, ZTP_DATA_INFO * info) : data_(data), info_(info) {
+
+    }
+
+    void exec(TCPSocketHandler * hndl) {
+        ((ZTPServerHandler*) hndl)->SendData(data_, info_);
+    }
+private:
+    const void * data_;
+    ZTP_DATA_INFO * info_;
+};
+
+class SendDataByNodeIdAction : public TCPServer::Action {
+public:
+
+    SendDataByNodeIdAction(const void *data, ZTP_DATA_INFO * info, UINT nodeid) : data_(data), info_(info), m_nodeid(nodeid) {
+
+    }
+
+    void exec(TCPSocketHandler * hndl) {
+        ((ZTPServerHandler*) hndl)->SendData(data_, info_, m_nodeid);
+    }
+private:
+    const void * data_;
+    ZTP_DATA_INFO * info_;
+    UINT m_nodeid;
+};
+
+class DumpAction : public TCPServer::Action {
+public:
+
+    DumpAction(vector<vector<char> > *arryInfo) : arryInfo_(arryInfo) {
+
+    }
+
+    void exec(TCPSocketHandler * hndl) {
+        ((ZTPServerHandler*) hndl)->dump(arryInfo_);
+    }
+private:
+    vector<vector<char> > *arryInfo_;
+};
+
+ZTPServer::ZTPServer(ZTPHandler * hndl, const ZTPServer::Builder&builder) {
+    m_ztphandler = hndl;
+    m_port = builder.m_port;
+    m_NetBufSetting = builder.m_NetBufSetting;
+    m_localid = builder.m_localid;
+    m_dwPktSize = builder.m_dwPktSize;
+    m_bCompress = builder.m_bCompress;
+    m_iCompressLevel = builder.m_iCompressLevel;
+    m_bEncrypt = builder.m_bEncrypt;
+}
+
+ZTPServer::ZTPServer(ZTPHandler * hndl, int port, UINT localid, DWORD dwBufSize, bool bEncrypt,
+        DWORD dwPktSize) {
+    this->m_ztphandler = hndl;
+    this->m_port = port;
+    this->m_bEncrypt = bEncrypt;
+    this->m_dwPktSize = dwPktSize;
+    this->m_localid = localid;
+    bool compress_is = false;
+    this->m_bCompress = compress_is;
+    this->m_iCompressLevel = 1;
+    this->m_NetBufSetting.iMaxMemBufSize = 10 * 1024 * 1024;
+    this->m_NetBufSetting.wMaxBufCount = 4;
+    this->m_NetBufSetting.dwMaxFileSize = 1024 * 500 * 1024;
+    this->m_NetBufSetting.BufMode = WITHOUT_FILECACHE;
+    this->m_NetBufSetting.iProperSize = 0x20000;
+    
+}
+
+ZTPServer::~ZTPServer() {
+    if (m_ztphandler) {
+        delete m_ztphandler;
+    }
+    if (m_tcpserver) {
+        m_tcpserver->Stop();
+        delete m_tcpserver;
+    }
+}
+
+/**
+ @biref 启动服务
+ @return true-成功，false-失败
+ */
+bool ZTPServer::Start() {
+    this->m_ztpservice = new ZTPServerHandler(this->m_ztphandler, m_localid, m_bEncrypt, m_bCompress, m_dwPktSize, m_iCompressLevel);
+    this->m_ztpservice->SetNetBufSetting(&this->m_NetBufSetting);
+    this->m_tcpserver = new TCPServer(this->m_ztpservice, this->m_port);
+    return this->m_tcpserver->Start();
+}
+
+/**
+ @brief 停止服务
+ */
+void ZTPServer::Stop() {
+    this->m_tcpserver->Stop();
+}
+
+/**
+ @brief 向所有连接到的客户端广播数据
+ */
+
+
+void ZTPServer::SendData(const void * data/*rsi*/,
+        ZTP_DATA_INFO * info/*rdx*/) {
+    SendDataAction zaction(data, info);
+    this->m_tcpserver->ForEach((TCPServer::Action*) & zaction);
+}
+
+void ZTPServer::SendData(const void * data/*rsi*/,
+        ZTP_DATA_INFO * info/*rdx*/, UINT nodeid) {
+    SendDataByNodeIdAction zaction(data, info, nodeid);
+    this->m_tcpserver->ForEach((TCPServer::Action*) & zaction);
+}
+
+int ZTPServer::SetOption(const char *optname, UINT optvalue) {
+    string s(optname);
+    if (s.compare("compress") == 0) {
+        this->m_bCompress = optvalue;
+        if (optvalue != 0) {
+            if (optvalue != 1) {
+                this->m_iCompressLevel = 9;
+            }
+        }
+    }
+    if (s.compare("NetBufMode") == 0) {
+        if (optvalue < 2) {
+            this->m_NetBufSetting.BufMode = optvalue;
+        }
+    }
+    if (s.compare("NetBufCount") == 0) {
+        this->m_NetBufSetting.wMaxBufCount = optvalue;
+    }
+    if (s.compare("packet_size") == 0) {
+        this->m_dwPktSize = optvalue;
+    }
+    return 0;
+}
+
+int ZTPServer::SetUsernamePassword(const char *username, const char *password) {
+    return 0;
+}
+
+void ZTPServer::DumpAll(vector<vector<char> > *arryInfo) {
+    DumpAction zaction(arryInfo);
+    this->m_tcpserver->ForEach((TCPServer::Action*) & zaction);
+}
+
